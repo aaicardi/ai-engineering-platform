@@ -1,0 +1,42 @@
+name: AI Platform CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-platform:
+    name: Validate Platform & Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+        continue-on-error: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check OpenSpec & Project Integrity
+        run: |
+          echo "=== Auditing Repository Structure ==="
+          test -d openspec/specs || (echo "Missing openspec/specs directory" && exit 1)
+          test -d .claude/agents || (echo "Missing .claude/agents directory" && exit 1)
+          test -f CLAUDE.md || (echo "Missing CLAUDE.md file" && exit 1)
+          echo "Repository structure integrity passed."
+
+      - name: Validate App Configuration
+        run: |
+          if [ -f appsettings.json ]; then
+            node -e "JSON.parse(fs.readFileSync('appsettings.json'))"
+            echo "appsettings.json is valid JSON."
+          fi
