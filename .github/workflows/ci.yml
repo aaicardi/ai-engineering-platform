@@ -19,7 +19,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-        continue-on-error: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -40,3 +39,12 @@ jobs:
             node -e "JSON.parse(fs.readFileSync('appsettings.json'))"
             echo "appsettings.json is valid JSON."
           fi
+
+      - name: Restore AIHarness Solution
+        run: dotnet restore AIHarness.sln
+
+      - name: Build AIHarness Solution
+        run: dotnet build AIHarness.sln --configuration Release --no-restore
+
+      - name: Run AI Harness Audit
+        run: dotnet run --project src/AIHarness/AIHarness.csproj --configuration Release --no-build
