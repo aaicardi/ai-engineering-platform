@@ -46,5 +46,8 @@ jobs:
       - name: Build AIHarness Solution
         run: dotnet build AIHarness.sln --configuration Release --no-restore
 
+      - name: Test AIHarness Solution
+        run: dotnet test AIHarness.sln --configuration Release --no-build
+
       - name: Run AI Harness Audit
         run: dotnet run --project src/AIHarness/AIHarness.csproj --configuration Release --no-build

@@ -1,15 +1,46 @@
 using AIHarness.Inspection;
+using AIHarness.Prompting;
 
-// Usage: AIHarness [repositoryRoot]
-// Without an argument, the root is discovered by walking up from the current directory.
-var root = args.Length > 0
-    ? Path.GetFullPath(args[0])
+// Usage:
+//   AIHarness [repositoryRoot]                                   -> auditoría del repositorio
+//   AIHarness --agent <name> --spec <file> [--root <dir>] [--no-save]
+//                                                                -> prompt unificado (consola + .claude/tmp/current-prompt.md)
+// Without a root, it is discovered by walking up from the current directory.
+string? agentArg = null, specArg = null, rootArg = null;
+var save = true;
+for (var i = 0; i < args.Length; i++)
+{
+    switch (args[i])
+    {
+        case "--agent" when i + 1 < args.Length: agentArg = args[++i]; break;
+        case "--spec" when i + 1 < args.Length: specArg = args[++i]; break;
+        case "--root" when i + 1 < args.Length: rootArg = args[++i]; break;
+        case "--no-save": save = false; break;
+        case var a when a.StartsWith("--", StringComparison.Ordinal):
+            Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
+            return 2;
+        default: rootArg ??= args[i]; break;
+    }
+}
+
+var root = rootArg is not null
+    ? Path.GetFullPath(rootArg)
     : RepositoryInspector.FindRepositoryRoot(Directory.GetCurrentDirectory());
 
 if (root is null || !Directory.Exists(root))
 {
     Console.Error.WriteLine("[ERROR] No se encontró la raíz del repositorio (directorio con CLAUDE.md).");
     return 1;
+}
+
+if (agentArg is not null || specArg is not null)
+{
+    if (agentArg is null || specArg is null)
+    {
+        Console.Error.WriteLine("[ERROR] Se requieren ambos parámetros: --agent <nombre> --spec <archivo>.");
+        return 2;
+    }
+    return BuildPrompt(new ContextBuilder(root), root, agentArg, specArg, save);
 }
 
 var report = new RepositoryInspector(root).Inspect();
@@ -52,3 +83,27 @@ Console.WriteLine();
 
 Console.WriteLine(report.IsSuccessful ? "Resultado: AUDITORÍA EXITOSA" : "Resultado: AUDITORÍA FALLIDA");
 return report.IsSuccessful ? 0 : 1;
+
+static int BuildPrompt(IContextBuilder builder, string root, string agent, string spec, bool save)
+{
+    PromptContext context;
+    try
+    {
+        context = builder.Build(agent, spec);
+    }
+    catch (Exception ex) when (ex is ContextSourceNotFoundException or ArgumentException)
+    {
+        Console.Error.WriteLine($"[ERROR] {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine(context.Prompt);
+
+    if (save)
+    {
+        var outputPath = Path.Combine(root, ContextBuilder.DefaultOutputRelativePath);
+        builder.Export(context, outputPath);
+        Console.Error.WriteLine($"[INFO] Prompt exportado a {outputPath}");
+    }
+    return 0;
+}
