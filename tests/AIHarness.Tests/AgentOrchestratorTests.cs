@@ -1,4 +1,5 @@
 using AIHarness.Execution;
+using AIHarness.GitHub;
 using AIHarness.Orchestration;
 using AIHarness.Prompting;
 
@@ -76,6 +77,7 @@ public sealed class AgentOrchestratorTests : IDisposable
                 $"git rev-parse --verify --quiet refs/heads/{Branch}",
                 $"git checkout -b {Branch}",
                 "claude -p",
+                "git status --porcelain",
                 "dotnet test",
                 "git rev-list --count main..HEAD",
             ],
@@ -179,6 +181,46 @@ public sealed class AgentOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_AgentLeavesChanges_CommitsThemBeforeRunningTests()
+    {
+        var runner = HappyPath().On("git status --porcelain", stdout: "?? src/New.cs\n M src/Program.cs\n");
+
+        var result = await RunAsync(runner);
+
+        Assert.True(result.Succeeded);
+        var commands = runner.CommandLines.ToList();
+        var add = commands.IndexOf("git add --all");
+        Assert.True(add > commands.IndexOf("claude -p"));
+        var commit = runner.Requests[add + 1];
+        Assert.Equal(["commit", "-m", "feat(orchestration): Add Git Automation (closes #27)"], commit.Arguments);
+        Assert.Equal("dotnet test", commands[add + 2]);
+    }
+
+    [Fact]
+    public async Task RunAsync_AgentLeavesNoChanges_DoesNotCommit()
+    {
+        var runner = HappyPath();
+
+        await RunAsync(runner);
+
+        Assert.DoesNotContain(runner.Requests, r => r.Arguments.FirstOrDefault() is "add" or "commit");
+    }
+
+    [Fact]
+    public async Task RunAsync_CommitFails_SkipsTestsAndPullRequest()
+    {
+        var runner = HappyPath()
+            .On("git status --porcelain", stdout: "?? src/New.cs\n")
+            .On("git add --all", exitCode: 128);
+
+        var result = await RunAsync(runner, new OrchestrationOptions(CreatePullRequest: true));
+
+        Assert.Equal(OrchestrationStage.Commit, result.Stage);
+        Assert.Equal(128, result.ExitCode);
+        Assert.Equal("git add --all", runner.CommandLines.Last());
+    }
+
+    [Fact]
     public async Task RunAsync_TestsFail_DoesNotPreparePullRequest()
     {
         var runner = HappyPath().On("dotnet test", exitCode: 1);
@@ -249,6 +291,99 @@ public sealed class AgentOrchestratorTests : IDisposable
         var orchestrator = new AgentOrchestrator(HappyPath(), _root, TextWriter.Null, TextWriter.Null);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => orchestrator.RunAsync(null!));
+    }
+
+    private const string IssueBranch = "feature/31-feat-orchestration-add-unified-process-issue-flag";
+    private const string IssueSpecFileName = "009-feat-orchestration-add-unified-process-issue-flag.md";
+
+    private static readonly GitHubIssue Issue = new(
+        31, "feat(orchestration): Add unified --process-issue flag", "- Chain every stage", "octocat", "open", [],
+        "https://github.com/owner/repo/issues/31");
+
+    private static ScriptedProcessRunner IssueHappyPath() => new ScriptedProcessRunner()
+        .On("git rev-parse --abbrev-ref HEAD", stdout: "main\n")
+        .On($"git rev-parse --verify --quiet refs/heads/{IssueBranch}", exitCode: 1)
+        .On("git status --porcelain", stdout: "?? openspec/specs/x.md\n")
+        .On("git rev-list --count main..HEAD", stdout: "1\n");
+
+    private string IssueSpecPath => Path.Combine(_root, "openspec", "specs", IssueSpecFileName);
+
+    [Fact]
+    public async Task ProcessIssueAsync_ChainsBranchSpecAgentCommitTestsAndPullRequest()
+    {
+        var runner = IssueHappyPath();
+        string? requestedSpec = null;
+        var launchesBeforeSpec = -1;
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error, new OrchestrationOptions(CreatePullRequest: true))
+            .ProcessIssueAsync(Issue, spec =>
+            {
+                requestedSpec = spec;
+                launchesBeforeSpec = runner.Requests.Count;
+                return new PromptContext("developer", spec, "# Prompt");
+            });
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(IssueBranch, result.Branch);
+        // The spec is generated after the feature branch is checked out and before the agent runs.
+        Assert.Equal(IssueSpecFileName, requestedSpec);
+        Assert.True(File.Exists(IssueSpecPath));
+        Assert.Equal($"git checkout -b {IssueBranch}", runner.CommandLines.ElementAt(launchesBeforeSpec - 1));
+        Assert.Equal(
+            ["claude -p", "git status --porcelain", "git add --all"],
+            runner.CommandLines.Skip(launchesBeforeSpec).Take(3));
+        Assert.Contains(runner.Requests, r => r.Arguments.SequenceEqual(
+            ["commit", "-m", "feat(orchestration): Add unified --process-issue flag (closes #31)"]));
+        Assert.Equal(["dotnet test", "git rev-list --count main..HEAD", $"git push --set-upstream origin {IssueBranch}"],
+            runner.CommandLines.TakeLast(4).Take(3));
+        var pr = runner.Requests[^1];
+        Assert.Equal("gh", pr.FileName);
+        Assert.Contains($"Closes #31\n\nImplementa `openspec/specs/{IssueSpecFileName}`", pr.Arguments[^1]);
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_ExistingSpec_IsReusedInsteadOfGenerated()
+    {
+        const string existing = "010-feat-orchestration-add-unified-process-issue-flag.md";
+        var existingPath = Path.Combine(_root, "openspec", "specs", existing);
+        File.WriteAllText(existingPath, "# OpenSpec 010: feat(orchestration): Edited by hand\n\nCloses #31\n");
+        string? requestedSpec = null;
+
+        var result = await new AgentOrchestrator(IssueHappyPath(), _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, spec => new PromptContext("developer", requestedSpec = spec, "# Prompt"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(existing, requestedSpec);
+        Assert.False(File.Exists(Path.Combine(_root, "openspec", "specs", "011-feat-orchestration-add-unified-process-issue-flag.md")));
+        Assert.Equal("# OpenSpec 010: feat(orchestration): Edited by hand\n\nCloses #31\n", File.ReadAllText(existingPath));
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_DirtyWorkingTree_StopsBeforeGeneratingTheSpec()
+    {
+        var runner = IssueHappyPath().On("git status --porcelain --untracked-files=no", stdout: " M src/Program.cs\n");
+        var built = false;
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, spec => { built = true; return null; });
+
+        Assert.Equal(OrchestrationStage.Preflight, result.Stage);
+        Assert.Equal(IssueBranch, result.Branch);
+        Assert.False(built);
+        Assert.False(File.Exists(IssueSpecPath));
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_PromptCannotBeBuilt_FailsInSpecStageWithoutRunningTheAgent()
+    {
+        var runner = IssueHappyPath();
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, _ => null);
+
+        Assert.Equal(OrchestrationStage.Spec, result.Stage);
+        Assert.Equal(1, result.ExitCode);
+        Assert.DoesNotContain(runner.Requests, r => r.FileName == "claude");
     }
 
     private sealed class ThrowingProcessRunner : IProcessRunner

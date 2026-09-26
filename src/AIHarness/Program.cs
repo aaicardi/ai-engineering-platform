@@ -21,6 +21,11 @@ using AIHarness.Specs;
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
 //   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
+//   AIHarness --process-issue <number> [--agent <name>] [--repo <owner/name>] [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
+//                                                                -> pipeline completo: obtiene el Issue, crea/cambia a
+//                                                                   feature/<issue>-<slug>, genera (o reutiliza) la spec, ejecuta
+//                                                                   el agente (developer por defecto), confirma sus cambios,
+//                                                                   ejecuta dotnet test y prepara el PR (--create-pr lo publica)
 //   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
 // Without a root, it is discovered by walking up from the current directory.
 if (args.Contains("--version"))
@@ -30,7 +35,8 @@ if (args.Contains("--version"))
     return 0;
 }
 
-string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null;
+const string DefaultAgent = "developer";
+string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null, processIssueArg = null;
 var save = true;
 var generateSpec = false;
 var execute = false;
@@ -51,6 +57,7 @@ for (var i = 0; i < args.Length; i++)
         case "--execute": execute = true; break;
         case "--orchestrate": orchestrate = true; break;
         case "--create-pr": createPr = true; break;
+        case "--process-issue" when i + 1 < args.Length: processIssueArg = args[++i]; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
@@ -58,9 +65,28 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
+if (processIssueArg is not null)
+{
+    if (issueArg is not null || specArg is not null || generateSpec || execute || orchestrate)
+    {
+        Console.Error.WriteLine("[ERROR] --process-issue no se combina con --issue, --spec, --generate-spec, --execute ni --orchestrate.");
+        return 2;
+    }
+    var issueRoot = rootArg is not null
+        ? Path.GetFullPath(rootArg)
+        : RepositoryInspector.FindRepositoryRoot(Directory.GetCurrentDirectory());
+    if (issueRoot is null || !File.Exists(Path.Combine(issueRoot, "CLAUDE.md")))
+    {
+        Console.Error.WriteLine("[ERROR] No se encontró la raíz del repositorio (directorio con CLAUDE.md).");
+        return 1;
+    }
+    return await ProcessIssueAsync(processIssueArg, repoArg, issueRoot, agentArg ?? DefaultAgent, save,
+        new OrchestrationOptions(baseArg ?? "main", createPr));
+}
+
 if ((baseArg is not null || createPr) && !orchestrate)
 {
-    Console.Error.WriteLine("[ERROR] --base y --create-pr requieren --orchestrate.");
+    Console.Error.WriteLine("[ERROR] --base y --create-pr requieren --orchestrate o --process-issue.");
     return 2;
 }
 
@@ -193,13 +219,29 @@ static CancellationTokenSource CancelOnCtrlC()
     return cts;
 }
 
-static async Task<int> OrchestrateAsync(PromptContext context, string root, OrchestrationOptions options)
+static Task<int> OrchestrateAsync(PromptContext context, string root, OrchestrationOptions options) =>
+    RunOrchestratorAsync(root, options, (orchestrator, ct) => orchestrator.RunAsync(context, ct));
+
+static async Task<int> ProcessIssueAsync(string issueArg, string? repoArg, string root, string agent, bool save, OrchestrationOptions options)
+{
+    var (issue, _, exitCode) = await FetchIssueAsync(issueArg, repoArg, root);
+    if (issue is null)
+        return exitCode;
+    Console.Error.WriteLine($"[INFO] Issue #{issue.Number}: {issue.Title}");
+
+    var builder = new ContextBuilder(root);
+    return await RunOrchestratorAsync(root, options, (orchestrator, ct) =>
+        orchestrator.ProcessIssueAsync(issue, spec => BuildPrompt(builder, root, agent, spec, save, print: false), ct));
+}
+
+static async Task<int> RunOrchestratorAsync(
+    string root, OrchestrationOptions options, Func<AgentOrchestrator, CancellationToken, Task<OrchestrationResult>> run)
 {
     using var cts = CancelOnCtrlC();
     var orchestrator = new AgentOrchestrator(new AIHarness.Execution.ProcessRunner(), root, Console.Out, Console.Error, options);
     try
     {
-        var result = await orchestrator.RunAsync(context, cts.Token);
+        var result = await run(orchestrator, cts.Token);
         if (result.Succeeded)
             Console.Error.WriteLine($"[INFO] Orquestación completada en la rama {result.Branch}.");
         return result.ExitCode;
@@ -239,10 +281,31 @@ static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
 
 static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string directory, string? specsDir)
 {
+    var (issue, repository, exitCode) = await FetchIssueAsync(issueArg, repoArg, directory);
+    if (issue is null)
+        return exitCode;
+
+    Console.WriteLine($"=== GitHub Issue #{issue.Number} — {repository} ===");
+    Console.WriteLine($"Título    : {issue.Title}");
+    Console.WriteLine($"Estado    : {issue.State}");
+    Console.WriteLine($"Autor     : {issue.Author}");
+    Console.WriteLine($"Etiquetas : {(issue.Labels.Count == 0 ? "(ninguna)" : string.Join(", ", issue.Labels))}");
+    Console.WriteLine($"URL       : {issue.HtmlUrl}");
+    Console.WriteLine();
+    Console.WriteLine("--- Cuerpo ---");
+    Console.WriteLine(string.IsNullOrWhiteSpace(issue.Body) ? "(sin descripción)" : issue.Body);
+
+    return specsDir is null ? 0 : GenerateSpec(new SpecGenerator(specsDir), issue);
+}
+
+// Resolves the repository and credentials and fetches the Issue; on failure the error is already reported
+// and Issue is null with the exit code to return.
+static async Task<(GitHubIssue? Issue, GitHubRepository? Repository, int ExitCode)> FetchIssueAsync(string issueArg, string? repoArg, string directory)
+{
     if (!int.TryParse(issueArg, out var number) || number <= 0)
     {
         Console.Error.WriteLine($"[ERROR] Número de Issue inválido: {issueArg}");
-        return 2;
+        return (null, null, 2);
     }
 
     GitHubRepository? repository;
@@ -251,13 +314,13 @@ static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string d
         if (!GitHubRepository.TryParse(repoArg, out repository))
         {
             Console.Error.WriteLine($"[ERROR] Repositorio inválido: {repoArg} (formato esperado: owner/name).");
-            return 2;
+            return (null, null, 2);
         }
     }
     else if ((repository = GitHubConnector.ResolveRepositoryFromGit(directory)) is null)
     {
         Console.Error.WriteLine("[ERROR] No se pudo determinar el repositorio desde el remote 'origin'. Use --repo <owner/name>.");
-        return 1;
+        return (null, null, 1);
     }
 
     // Only the token *source* is ever printed, never its value.
@@ -274,40 +337,29 @@ static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string d
     catch (GitHubIssueNotFoundException ex)
     {
         Console.Error.WriteLine($"[ERROR] {ex.Message}");
-        return 1;
+        return (null, null, 1);
     }
     catch (Octokit.AuthorizationException)
     {
         Console.Error.WriteLine("[ERROR] Credenciales de GitHub rechazadas (token inválido o expirado).");
-        return 1;
+        return (null, null, 1);
     }
     catch (Octokit.RateLimitExceededException ex)
     {
         Console.Error.WriteLine($"[ERROR] Límite de tasa de la API de GitHub excedido; se restablece {ex.Reset.ToLocalTime():u}.");
-        return 1;
+        return (null, null, 1);
     }
     catch (Octokit.ApiException ex)
     {
         Console.Error.WriteLine($"[ERROR] Error de la API de GitHub ({(int)ex.StatusCode}): {ex.Message}");
-        return 1;
+        return (null, null, 1);
     }
     catch (HttpRequestException ex)
     {
         Console.Error.WriteLine($"[ERROR] No se pudo conectar con GitHub: {ex.Message}");
-        return 1;
+        return (null, null, 1);
     }
-
-    Console.WriteLine($"=== GitHub Issue #{issue.Number} — {repository} ===");
-    Console.WriteLine($"Título    : {issue.Title}");
-    Console.WriteLine($"Estado    : {issue.State}");
-    Console.WriteLine($"Autor     : {issue.Author}");
-    Console.WriteLine($"Etiquetas : {(issue.Labels.Count == 0 ? "(ninguna)" : string.Join(", ", issue.Labels))}");
-    Console.WriteLine($"URL       : {issue.HtmlUrl}");
-    Console.WriteLine();
-    Console.WriteLine("--- Cuerpo ---");
-    Console.WriteLine(string.IsNullOrWhiteSpace(issue.Body) ? "(sin descripción)" : issue.Body);
-
-    return specsDir is null ? 0 : GenerateSpec(new SpecGenerator(specsDir), issue);
+    return (issue, repository, 0);
 }
 
 static int GenerateSpec(SpecGenerator generator, GitHubIssue issue)

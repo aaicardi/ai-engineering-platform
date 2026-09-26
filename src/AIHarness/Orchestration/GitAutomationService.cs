@@ -31,6 +31,27 @@ public sealed class GitAutomationService(
         return status.Length == 0;
     }
 
+    /// <summary>
+    /// <c>true</c> when any file is modified, staged or untracked (and not ignored),
+    /// i.e. there is something for <see cref="CommitAllAsync"/> to record.
+    /// </summary>
+    /// <exception cref="GitAutomationException">git failed.</exception>
+    public async Task<bool> HasUncommittedChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var status = await CaptureGitAsync(["status", "--porcelain"], cancellationToken);
+        return status.Length > 0;
+    }
+
+    /// <summary>Stages every change, including untracked files not covered by .gitignore, and commits it.</summary>
+    /// <returns>The exit code of the first git command that failed, or 0.</returns>
+    public async Task<int> CommitAllAsync(string message, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
+
+        var exitCode = await RelayAsync(gitExecutable, ["add", "--all"], cancellationToken);
+        return exitCode != 0 ? exitCode : await RelayAsync(gitExecutable, ["commit", "-m", message], cancellationToken);
+    }
+
     /// <summary>Current branch name, or <c>null</c> on a detached HEAD.</summary>
     /// <exception cref="GitAutomationException">git failed.</exception>
     public async Task<string?> GetCurrentBranchAsync(CancellationToken cancellationToken = default)

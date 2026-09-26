@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using AIHarness.GitHub;
 using AIHarness.Specs;
 
 namespace AIHarness.Orchestration;
@@ -9,6 +10,19 @@ public sealed partial record SpecMetadata(int IssueNumber, string Title, string 
 {
     /// <summary>Feature branch for this spec: <c>feature/&lt;issue&gt;-&lt;slug&gt;</c>.</summary>
     public string BranchName => $"feature/{IssueNumber}-{Slug}";
+
+    /// <summary>
+    /// Metadata of the spec <see cref="SpecGenerator"/> produces for <paramref name="issue"/>, known before it is written,
+    /// so the feature branch can be created first.
+    /// </summary>
+    public static SpecMetadata FromIssue(GitHubIssue issue)
+    {
+        ArgumentNullException.ThrowIfNull(issue);
+
+        var slug = SpecGenerator.Slugify(issue.Title, issue.Number);
+        var title = WhitespaceRegex().Replace(issue.Title ?? string.Empty, " ").Trim();
+        return new SpecMetadata(issue.Number, title.Length == 0 ? slug : title, slug);
+    }
 
     /// <summary>Parses the spec's <c>Closes #N</c> reference, H1 title and file-name slug.</summary>
     /// <exception cref="InvalidDataException">The spec has no <c>Closes #N</c> Issue reference.</exception>
@@ -43,4 +57,7 @@ public sealed partial record SpecMetadata(int IssueNumber, string Title, string 
 
     [GeneratedRegex(@"^OpenSpec\s+\d+\s*:\s*", RegexOptions.IgnoreCase)]
     private static partial Regex SpecTitlePrefixRegex();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
 }
