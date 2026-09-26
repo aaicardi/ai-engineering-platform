@@ -27,11 +27,18 @@ using AIHarness.Specs;
 //                                                                   el agente (developer por defecto), confirma sus cambios,
 //                                                                   ejecuta dotnet test y prepara el PR (--create-pr lo publica)
 //   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
+//   AIHarness --status                                           -> estado: versión, runtime, SO y uptime del sistema
 // Without a root, it is discovered by walking up from the current directory.
 if (args.Contains("--version"))
 {
     // Takes precedence over any other argument, like most CLIs.
     Console.WriteLine(VersionInfo.Current);
+    return 0;
+}
+
+if (args.Contains("--status"))
+{
+    Console.WriteLine(StatusInfo.Capture());
     return 0;
 }
 
