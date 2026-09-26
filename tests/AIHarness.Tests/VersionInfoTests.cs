@@ -1,12 +1,10 @@
-using System.Reflection;
 using AIHarness.Cli;
 
 namespace AIHarness.Tests;
 
+[Collection(ConsoleCollection.Name)]
 public sealed class VersionInfoTests
 {
-    private static readonly Assembly HarnessAssembly = typeof(VersionInfo).Assembly;
-
     [Fact]
     public void Current_ReportsAssemblyVersionAndDotNetRuntime()
     {
@@ -34,28 +32,10 @@ public sealed class VersionInfoTests
     [InlineData("--agent", "developer", "--version")]
     public async Task Main_WithVersionFlag_PrintsVersionAndRuntimeAndReturnsZero(params string[] args)
     {
-        var (exitCode, output) = await RunCliAsync(args);
+        var (exitCode, output) = await CliHost.RunAsync(args);
 
         Assert.Equal(0, exitCode);
         Assert.StartsWith($"AIHarness {VersionInfo.Current.Version}", output);
         Assert.Contains(Environment.Version.ToString(), output);
-    }
-
-    private static async Task<(int ExitCode, string Output)> RunCliAsync(string[] args)
-    {
-        var entryPoint = HarnessAssembly.EntryPoint!;
-        var original = Console.Out;
-        var writer = new StringWriter();
-        Console.SetOut(writer);
-        try
-        {
-            var result = entryPoint.Invoke(null, [args]);
-            var exitCode = result is Task<int> task ? await task : (int)result!;
-            return (exitCode, writer.ToString());
-        }
-        finally
-        {
-            Console.SetOut(original);
-        }
     }
 }
