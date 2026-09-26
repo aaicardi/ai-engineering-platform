@@ -1,4 +1,6 @@
+using AIHarness.GitHub;
 using AIHarness.Orchestration;
+using AIHarness.Specs;
 
 namespace AIHarness.Tests;
 
@@ -40,6 +42,26 @@ public sealed class SpecMetadataTests
         var spec = SpecMetadata.Parse("007-agent-runner.md", "Closes #20\r\n");
 
         Assert.Equal("agent-runner", spec.Title);
+    }
+
+    [Fact]
+    public void FromIssue_MatchesTheMetadataOfTheGeneratedSpec()
+    {
+        var issue = new GitHubIssue(31, "feat(orchestration): Add  unified\n--process-issue flag", null, "octocat", "open", [], "https://github.com/o/r/issues/31");
+        var specs = Directory.CreateTempSubdirectory("aiharness-meta-").FullName;
+        try
+        {
+            var generated = new SpecGenerator(specs).Generate(issue);
+
+            var expected = SpecMetadata.Parse(generated.FileName, generated.Content);
+
+            Assert.Equal(expected, SpecMetadata.FromIssue(issue));
+            Assert.Equal("feature/31-feat-orchestration-add-unified-process-issue-flag", expected.BranchName);
+        }
+        finally
+        {
+            Directory.Delete(specs, recursive: true);
+        }
     }
 
     [Fact]

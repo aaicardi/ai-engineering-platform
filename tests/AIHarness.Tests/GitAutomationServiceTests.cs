@@ -30,6 +30,38 @@ public sealed class GitAutomationServiceTests
     }
 
     [Theory]
+    [InlineData("", false)]
+    [InlineData(" M file.cs\n", true)]
+    [InlineData("?? new.cs\n", true)]
+    public async Task HasUncommittedChangesAsync_IncludesUntrackedFiles(string porcelain, bool expected)
+    {
+        var runner = new ScriptedProcessRunner().On("git status --porcelain", stdout: porcelain);
+
+        Assert.Equal(expected, await Service(runner).HasUncommittedChangesAsync());
+    }
+
+    [Fact]
+    public async Task CommitAllAsync_StagesEverythingThenCommitsWithTheMessage()
+    {
+        var runner = new ScriptedProcessRunner();
+
+        var exitCode = await Service(runner).CommitAllAsync("feat(x): it's done (closes #1)");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(["add", "--all"], runner.Requests[0].Arguments);
+        Assert.Equal(["commit", "-m", "feat(x): it's done (closes #1)"], runner.Requests[1].Arguments);
+    }
+
+    [Fact]
+    public async Task CommitAllAsync_AddFails_DoesNotCommit()
+    {
+        var runner = new ScriptedProcessRunner().On("git add --all", exitCode: 128);
+
+        Assert.Equal(128, await Service(runner).CommitAllAsync("feat: x"));
+        Assert.Equal(["git add --all"], runner.CommandLines);
+    }
+
+    [Theory]
     [InlineData("main\n", "main")]
     [InlineData("HEAD\n", null)]
     public async Task GetCurrentBranchAsync_ReturnsNullOnDetachedHead(string stdout, string? expected)

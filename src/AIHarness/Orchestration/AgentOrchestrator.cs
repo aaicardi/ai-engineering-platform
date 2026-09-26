@@ -1,5 +1,7 @@
 using AIHarness.Execution;
+using AIHarness.GitHub;
 using AIHarness.Prompting;
+using AIHarness.Specs;
 
 namespace AIHarness.Orchestration;
 
@@ -12,7 +14,7 @@ namespace AIHarness.Orchestration;
 public sealed record OrchestrationOptions(string BaseBranch = "main", bool CreatePullRequest = false);
 
 /// <summary>Lifecycle stage an orchestration stopped at; <see cref="Completed"/> when every stage succeeded.</summary>
-public enum OrchestrationStage { Preflight, Branch, Agent, Tests, PullRequest, Completed }
+public enum OrchestrationStage { Preflight, Branch, Spec, Agent, Commit, Tests, PullRequest, Completed }
 
 public sealed record OrchestrationResult(OrchestrationStage Stage, int ExitCode, string? Branch = null)
 {
@@ -21,7 +23,7 @@ public sealed record OrchestrationResult(OrchestrationStage Stage, int ExitCode,
 
 /// <summary>
 /// Runs an agent inside a managed Git lifecycle: clean working tree → feature branch
-/// <c>feature/&lt;issue&gt;-&lt;slug&gt;</c> → agent → <c>dotnet test</c> → Pull Request.
+/// <c>feature/&lt;issue&gt;-&lt;slug&gt;</c> → spec/prompt → agent → auto-commit → <c>dotnet test</c> → Pull Request.
 /// Stops at the first failing stage. Progress is logged to the error writer; subprocess output is relayed as produced.
 /// </summary>
 public sealed class AgentOrchestrator
@@ -46,16 +48,38 @@ public sealed class AgentOrchestrator
         _git = new GitAutomationService(processRunner, rootPath, output, error);
     }
 
+    /// <summary>Runs the lifecycle for an existing spec (<c>--orchestrate</c>).</summary>
     /// <exception cref="OperationCanceledException">Cancelled; the running subprocess has been killed.</exception>
-    public async Task<OrchestrationResult> RunAsync(PromptContext context, CancellationToken cancellationToken = default)
+    public Task<OrchestrationResult> RunAsync(PromptContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return RunPipelineAsync(() => LoadSpec(context.SpecFileName), () => context, cancellationToken);
+    }
 
+    /// <summary>
+    /// Runs the lifecycle for a GitHub Issue (<c>--process-issue</c>): the spec is generated on the feature branch
+    /// (or reused when it already exists, so a run can be resumed) and <paramref name="buildContext"/> turns its
+    /// file name into the agent prompt; returning <c>null</c> fails the <see cref="OrchestrationStage.Spec"/> stage.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">Cancelled; the running subprocess has been killed.</exception>
+    public Task<OrchestrationResult> ProcessIssueAsync(GitHubIssue issue, Func<string, PromptContext?> buildContext, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(issue);
+        ArgumentNullException.ThrowIfNull(buildContext);
+        return RunPipelineAsync(() => SpecMetadata.FromIssue(issue), () => buildContext(GenerateSpec(issue)), cancellationToken);
+    }
+
+    /// <summary>Commit message for the agent's changes: the spec title (a Conventional Commit header) closing its Issue.</summary>
+    public static string CommitMessage(SpecMetadata spec) => $"{spec.Title} (closes #{spec.IssueNumber})";
+
+    private async Task<OrchestrationResult> RunPipelineAsync(
+        Func<SpecMetadata> resolveSpec, Func<PromptContext?> prepareContext, CancellationToken cancellationToken)
+    {
         var stage = OrchestrationStage.Preflight;
         string? branch = null;
         try
         {
-            var spec = LoadSpec(context.SpecFileName);
+            var spec = resolveSpec();
             branch = spec.BranchName;
 
             if (!await _git.IsWorkingTreeCleanAsync(cancellationToken))
@@ -67,11 +91,32 @@ public sealed class AgentOrchestrator
             if (exitCode != 0)
                 return Fail(stage, exitCode, branch, $"No se pudo crear/cambiar a la rama {branch}.");
 
+            stage = OrchestrationStage.Spec;
+            var context = prepareContext();
+            if (context is null)
+                return Fail(stage, 1, branch, "No se pudo construir el prompt del agente.");
+            // Title and Issue for the commit and the PR come from the spec actually implemented.
+            spec = LoadSpec(context.SpecFileName);
+
             stage = OrchestrationStage.Agent;
             Info($"Ejecutando agente '{context.AgentName}' con {context.SpecFileName}...");
             exitCode = await new AgentRunner(processRunner, rootPath, output, error).RunAsync(context, cancellationToken);
             if (exitCode != 0)
                 return Fail(stage, exitCode, branch, $"El agente finalizó con código de salida {exitCode}.");
+
+            stage = OrchestrationStage.Commit;
+            if (await _git.HasUncommittedChangesAsync(cancellationToken))
+            {
+                var message = CommitMessage(spec);
+                Info($"Confirmando los cambios del agente: {message}");
+                exitCode = await _git.CommitAllAsync(message, cancellationToken);
+                if (exitCode != 0)
+                    return Fail(stage, exitCode, branch, "No se pudieron confirmar los cambios del agente.");
+            }
+            else
+            {
+                Info("El agente no dejó cambios pendientes de confirmar.");
+            }
 
             stage = OrchestrationStage.Tests;
             Info($"Ejecutando '{GitAutomationService.FormatCommand(DotnetExecutable, TestArguments)}'...");
@@ -93,10 +138,25 @@ public sealed class AgentOrchestrator
         }
     }
 
-    private SpecMetadata LoadSpec(string specFileName)
+    private string SpecsDirectory => Path.Combine(rootPath, SpecGenerator.DefaultSpecsRelativePath);
+
+    private SpecMetadata LoadSpec(string specFileName) =>
+        SpecMetadata.Parse(specFileName, File.ReadAllText(Path.Combine(SpecsDirectory, specFileName)));
+
+    /// <returns>File name of the generated spec, or of the existing one for the same Issue.</returns>
+    private string GenerateSpec(GitHubIssue issue)
     {
-        var path = Path.Combine(rootPath, "openspec", "specs", specFileName);
-        return SpecMetadata.Parse(specFileName, File.ReadAllText(path));
+        try
+        {
+            var spec = new SpecGenerator(SpecsDirectory).Generate(issue);
+            Info($"Especificación generada: {spec.FilePath}");
+            return spec.FileName;
+        }
+        catch (SpecAlreadyExistsException ex)
+        {
+            Info($"Se reutiliza la especificación existente: {ex.ExistingPath}");
+            return Path.GetFileName(ex.ExistingPath);
+        }
     }
 
     private async Task<int> PublishAsync(SpecMetadata spec, string specFileName, string branch, CancellationToken cancellationToken)
