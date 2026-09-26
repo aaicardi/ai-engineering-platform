@@ -1,6 +1,7 @@
 using AIHarness.Execution;
 using AIHarness.GitHub;
 using AIHarness.Inspection;
+using AIHarness.Orchestration;
 using AIHarness.Prompting;
 using AIHarness.Specs;
 
@@ -11,14 +12,21 @@ using AIHarness.Specs;
 //   AIHarness --agent <name> --spec <file> --execute [--root <dir>] [--no-save]
 //                                                                -> ejecuta el prompt con la CLI de Claude Code (claude -p),
 //                                                                   retransmite su salida y devuelve su código de salida
+//   AIHarness --agent <name> --spec <file> --orchestrate [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
+//                                                                -> ciclo Git completo: exige árbol limpio, crea/cambia a
+//                                                                   feature/<issue>-<slug>, ejecuta el agente y dotnet test, y
+//                                                                   prepara el PR; --create-pr además hace push y gh pr create
+//                                                                   (el push requiere aprobación humana explícita)
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
 //   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
 // Without a root, it is discovered by walking up from the current directory.
-string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null;
+string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null;
 var save = true;
 var generateSpec = false;
 var execute = false;
+var orchestrate = false;
+var createPr = false;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -30,12 +38,21 @@ for (var i = 0; i < args.Length; i++)
         case "--repo" when i + 1 < args.Length: repoArg = args[++i]; break;
         case "--no-save": save = false; break;
         case "--generate-spec": generateSpec = true; break;
+        case "--base" when i + 1 < args.Length: baseArg = args[++i]; break;
         case "--execute": execute = true; break;
+        case "--orchestrate": orchestrate = true; break;
+        case "--create-pr": createPr = true; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
         default: rootArg ??= args[i]; break;
     }
+}
+
+if ((baseArg is not null || createPr) && !orchestrate)
+{
+    Console.Error.WriteLine("[ERROR] --base y --create-pr requieren --orchestrate.");
+    return 2;
 }
 
 if (issueArg is not null || repoArg is not null || generateSpec)
@@ -73,7 +90,7 @@ if (root is null || !Directory.Exists(root))
     return 1;
 }
 
-if (agentArg is not null || specArg is not null || execute)
+if (agentArg is not null || specArg is not null || execute || orchestrate)
 {
     if (agentArg is null || specArg is null)
     {
@@ -81,9 +98,11 @@ if (agentArg is not null || specArg is not null || execute)
         return 2;
     }
     // When executing, the prompt goes to the CLI instead of the console.
-    var context = BuildPrompt(new ContextBuilder(root), root, agentArg, specArg, save, print: !execute);
+    var context = BuildPrompt(new ContextBuilder(root), root, agentArg, specArg, save, print: !execute && !orchestrate);
     if (context is null)
         return 1;
+    if (orchestrate)
+        return await OrchestrateAsync(context, root, new OrchestrationOptions(baseArg ?? "main", createPr));
     return execute ? await ExecuteAgentAsync(context, root) : 0;
 }
 
@@ -153,15 +172,39 @@ static PromptContext? BuildPrompt(IContextBuilder builder, string root, string a
     return context;
 }
 
-static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
+static CancellationTokenSource CancelOnCtrlC()
 {
-    using var cts = new CancellationTokenSource();
+    var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) =>
     {
-        // Let the runner kill the CLI process tree instead of terminating the harness abruptly.
+        // Let the runner kill the subprocess tree instead of terminating the harness abruptly.
         e.Cancel = true;
         cts.Cancel();
     };
+    return cts;
+}
+
+static async Task<int> OrchestrateAsync(PromptContext context, string root, OrchestrationOptions options)
+{
+    using var cts = CancelOnCtrlC();
+    var orchestrator = new AgentOrchestrator(new AIHarness.Execution.ProcessRunner(), root, Console.Out, Console.Error, options);
+    try
+    {
+        var result = await orchestrator.RunAsync(context, cts.Token);
+        if (result.Succeeded)
+            Console.Error.WriteLine($"[INFO] Orquestación completada en la rama {result.Branch}.");
+        return result.ExitCode;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("[WARN] Ejecución cancelada por el usuario.");
+        return 130;
+    }
+}
+
+static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
+{
+    using var cts = CancelOnCtrlC();
 
     var runner = new AgentRunner(new AIHarness.Execution.ProcessRunner(), root, Console.Out, Console.Error);
     Console.Error.WriteLine($"[INFO] Ejecutando agente '{context.AgentName}' con {context.SpecFileName} vía '{AgentRunner.DefaultExecutable} {string.Join(' ', AgentRunner.CliArguments)}'...");
