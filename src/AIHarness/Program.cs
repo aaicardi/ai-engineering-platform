@@ -1,6 +1,7 @@
 using AIHarness.GitHub;
 using AIHarness.Inspection;
 using AIHarness.Prompting;
+using AIHarness.Specs;
 
 // Usage:
 //   AIHarness [repositoryRoot]                                   -> auditoría del repositorio
@@ -8,9 +9,11 @@ using AIHarness.Prompting;
 //                                                                -> prompt unificado (consola + .claude/tmp/current-prompt.md)
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
+//   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
 // Without a root, it is discovered by walking up from the current directory.
 string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null;
 var save = true;
+var generateSpec = false;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -21,6 +24,7 @@ for (var i = 0; i < args.Length; i++)
         case "--issue" when i + 1 < args.Length: issueArg = args[++i]; break;
         case "--repo" when i + 1 < args.Length: repoArg = args[++i]; break;
         case "--no-save": save = false; break;
+        case "--generate-spec": generateSpec = true; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
@@ -28,14 +32,29 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-if (issueArg is not null || repoArg is not null)
+if (issueArg is not null || repoArg is not null || generateSpec)
 {
     if (issueArg is null)
     {
-        Console.Error.WriteLine("[ERROR] --repo requiere --issue <número>.");
+        Console.Error.WriteLine("[ERROR] --repo y --generate-spec requieren --issue <número>.");
         return 2;
     }
-    return await ShowIssueAsync(issueArg, repoArg, rootArg ?? Directory.GetCurrentDirectory());
+
+    string? specsDir = null;
+    if (generateSpec)
+    {
+        // Resolve the destination before calling the API so a bad root fails fast.
+        var specRoot = rootArg is not null
+            ? Path.GetFullPath(rootArg)
+            : RepositoryInspector.FindRepositoryRoot(Directory.GetCurrentDirectory());
+        if (specRoot is null || !File.Exists(Path.Combine(specRoot, "CLAUDE.md")))
+        {
+            Console.Error.WriteLine("[ERROR] No se encontró la raíz del repositorio (directorio con CLAUDE.md).");
+            return 1;
+        }
+        specsDir = Path.Combine(specRoot, SpecGenerator.DefaultSpecsRelativePath);
+    }
+    return await ShowIssueAsync(issueArg, repoArg, rootArg ?? Directory.GetCurrentDirectory(), specsDir);
 }
 
 var root = rootArg is not null
@@ -123,7 +142,7 @@ static int BuildPrompt(IContextBuilder builder, string root, string agent, strin
     return 0;
 }
 
-static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string directory)
+static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string directory, string? specsDir)
 {
     if (!int.TryParse(issueArg, out var number) || number <= 0)
     {
@@ -192,5 +211,26 @@ static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string d
     Console.WriteLine();
     Console.WriteLine("--- Cuerpo ---");
     Console.WriteLine(string.IsNullOrWhiteSpace(issue.Body) ? "(sin descripción)" : issue.Body);
-    return 0;
+
+    return specsDir is null ? 0 : GenerateSpec(new SpecGenerator(specsDir), issue);
+}
+
+static int GenerateSpec(SpecGenerator generator, GitHubIssue issue)
+{
+    try
+    {
+        var spec = generator.Generate(issue);
+        Console.Error.WriteLine($"[INFO] Especificación generada: {spec.FilePath}");
+        return 0;
+    }
+    catch (SpecAlreadyExistsException ex)
+    {
+        Console.Error.WriteLine($"[WARN] {ex.Message}");
+        return 1;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine($"[ERROR] No se pudo guardar la especificación: {ex.Message}");
+        return 1;
+    }
 }
