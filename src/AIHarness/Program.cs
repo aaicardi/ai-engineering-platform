@@ -1,3 +1,4 @@
+using AIHarness.Cli;
 using AIHarness.Execution;
 using AIHarness.GitHub;
 using AIHarness.Inspection;
@@ -20,7 +21,15 @@ using AIHarness.Specs;
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
 //   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
+//   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
 // Without a root, it is discovered by walking up from the current directory.
+if (args.Contains("--version"))
+{
+    // Takes precedence over any other argument, like most CLIs.
+    Console.WriteLine(VersionInfo.Current);
+    return 0;
+}
+
 string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null;
 var save = true;
 var generateSpec = false;
