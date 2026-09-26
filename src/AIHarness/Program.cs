@@ -1,3 +1,4 @@
+using AIHarness.Execution;
 using AIHarness.GitHub;
 using AIHarness.Inspection;
 using AIHarness.Prompting;
@@ -7,6 +8,9 @@ using AIHarness.Specs;
 //   AIHarness [repositoryRoot]                                   -> auditoría del repositorio
 //   AIHarness --agent <name> --spec <file> [--root <dir>] [--no-save]
 //                                                                -> prompt unificado (consola + .claude/tmp/current-prompt.md)
+//   AIHarness --agent <name> --spec <file> --execute [--root <dir>] [--no-save]
+//                                                                -> ejecuta el prompt con la CLI de Claude Code (claude -p),
+//                                                                   retransmite su salida y devuelve su código de salida
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
 //   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
@@ -14,6 +18,7 @@ using AIHarness.Specs;
 string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null;
 var save = true;
 var generateSpec = false;
+var execute = false;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -25,6 +30,7 @@ for (var i = 0; i < args.Length; i++)
         case "--repo" when i + 1 < args.Length: repoArg = args[++i]; break;
         case "--no-save": save = false; break;
         case "--generate-spec": generateSpec = true; break;
+        case "--execute": execute = true; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
@@ -67,14 +73,18 @@ if (root is null || !Directory.Exists(root))
     return 1;
 }
 
-if (agentArg is not null || specArg is not null)
+if (agentArg is not null || specArg is not null || execute)
 {
     if (agentArg is null || specArg is null)
     {
         Console.Error.WriteLine("[ERROR] Se requieren ambos parámetros: --agent <nombre> --spec <archivo>.");
         return 2;
     }
-    return BuildPrompt(new ContextBuilder(root), root, agentArg, specArg, save);
+    // When executing, the prompt goes to the CLI instead of the console.
+    var context = BuildPrompt(new ContextBuilder(root), root, agentArg, specArg, save, print: !execute);
+    if (context is null)
+        return 1;
+    return execute ? await ExecuteAgentAsync(context, root) : 0;
 }
 
 var report = new RepositoryInspector(root).Inspect();
@@ -118,7 +128,7 @@ Console.WriteLine();
 Console.WriteLine(report.IsSuccessful ? "Resultado: AUDITORÍA EXITOSA" : "Resultado: AUDITORÍA FALLIDA");
 return report.IsSuccessful ? 0 : 1;
 
-static int BuildPrompt(IContextBuilder builder, string root, string agent, string spec, bool save)
+static PromptContext? BuildPrompt(IContextBuilder builder, string root, string agent, string spec, bool save, bool print)
 {
     PromptContext context;
     try
@@ -128,10 +138,11 @@ static int BuildPrompt(IContextBuilder builder, string root, string agent, strin
     catch (Exception ex) when (ex is ContextSourceNotFoundException or ArgumentException)
     {
         Console.Error.WriteLine($"[ERROR] {ex.Message}");
-        return 1;
+        return null;
     }
 
-    Console.WriteLine(context.Prompt);
+    if (print)
+        Console.WriteLine(context.Prompt);
 
     if (save)
     {
@@ -139,7 +150,39 @@ static int BuildPrompt(IContextBuilder builder, string root, string agent, strin
         builder.Export(context, outputPath);
         Console.Error.WriteLine($"[INFO] Prompt exportado a {outputPath}");
     }
-    return 0;
+    return context;
+}
+
+static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
+{
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        // Let the runner kill the CLI process tree instead of terminating the harness abruptly.
+        e.Cancel = true;
+        cts.Cancel();
+    };
+
+    var runner = new AgentRunner(new AIHarness.Execution.ProcessRunner(), root, Console.Out, Console.Error);
+    Console.Error.WriteLine($"[INFO] Ejecutando agente '{context.AgentName}' con {context.SpecFileName} vía '{AgentRunner.DefaultExecutable} {string.Join(' ', AgentRunner.CliArguments)}'...");
+    try
+    {
+        var exitCode = await runner.RunAsync(context, cts.Token);
+        Console.Error.WriteLine(exitCode == 0
+            ? "[INFO] El agente finalizó correctamente."
+            : $"[ERROR] El agente finalizó con código de salida {exitCode}.");
+        return exitCode;
+    }
+    catch (ExecutableNotFoundException ex)
+    {
+        Console.Error.WriteLine($"[ERROR] {ex.Message}");
+        return 127;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("[WARN] Ejecución cancelada por el usuario.");
+        return 130;
+    }
 }
 
 static async Task<int> ShowIssueAsync(string issueArg, string? repoArg, string directory, string? specsDir)
