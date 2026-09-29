@@ -28,6 +28,8 @@ using AIHarness.Specs;
 //                                                                   ejecuta dotnet test y prepara el PR (--create-pr lo publica)
 //   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
 //   AIHarness --status                                           -> estado: versión, runtime, SO y uptime del sistema
+//   AIHarness --health [--root <dir>]                            -> diagnóstico JSON (CLAUDE.md, .claude, agentes, specs,
+//                                                                   entorno); código 0 si está sano, 1 si faltan componentes
 // Without a root, it is discovered by walking up from the current directory.
 if (args.Contains("--version"))
 {
@@ -49,6 +51,7 @@ var generateSpec = false;
 var execute = false;
 var orchestrate = false;
 var createPr = false;
+var health = false;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -65,11 +68,23 @@ for (var i = 0; i < args.Length; i++)
         case "--orchestrate": orchestrate = true; break;
         case "--create-pr": createPr = true; break;
         case "--process-issue" when i + 1 < args.Length: processIssueArg = args[++i]; break;
+        case "--health": health = true; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
         default: rootArg ??= args[i]; break;
     }
+}
+
+if (health)
+{
+    // A missing root is itself a health failure, reported in the JSON rather than as a bare error.
+    var healthRoot = rootArg is not null
+        ? Path.GetFullPath(rootArg)
+        : RepositoryInspector.FindRepositoryRoot(Directory.GetCurrentDirectory());
+    var healthReport = HealthReport.Capture(healthRoot, VersionInfo.Current);
+    Console.WriteLine(healthReport.ToJson());
+    return healthReport.ExitCode;
 }
 
 if (processIssueArg is not null)
