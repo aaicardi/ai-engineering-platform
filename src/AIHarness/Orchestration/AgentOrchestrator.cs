@@ -11,10 +11,16 @@ namespace AIHarness.Orchestration;
 /// Push the branch and run <c>gh pr create</c>. Pushing requires explicit human approval (CLAUDE.md §3),
 /// so it is opt-in; otherwise the commands are only prepared and printed.
 /// </param>
-public sealed record OrchestrationOptions(string BaseBranch = "main", bool CreatePullRequest = false);
+/// <param name="Repository">GitHub repository the Pull Request is opened on; <c>null</c> lets gh infer it from the working copy.</param>
+/// <param name="AgentTemplatesDirectory">Agent definitions copied into a greenfield repository when it is bootstrapped.</param>
+public sealed record OrchestrationOptions(
+    string BaseBranch = "main",
+    bool CreatePullRequest = false,
+    GitHubRepository? Repository = null,
+    string? AgentTemplatesDirectory = null);
 
 /// <summary>Lifecycle stage an orchestration stopped at; <see cref="Completed"/> when every stage succeeded.</summary>
-public enum OrchestrationStage { Preflight, Branch, Spec, Agent, Commit, Tests, PullRequest, Completed }
+public enum OrchestrationStage { Preflight, Bootstrap, Branch, Spec, Agent, Commit, Tests, PullRequest, Completed }
 
 public sealed record OrchestrationResult(OrchestrationStage Stage, int ExitCode, string? Branch = null)
 {
@@ -22,14 +28,15 @@ public sealed record OrchestrationResult(OrchestrationStage Stage, int ExitCode,
 }
 
 /// <summary>
-/// Runs an agent inside a managed Git lifecycle: clean working tree → feature branch
-/// <c>feature/&lt;issue&gt;-&lt;slug&gt;</c> → spec/prompt → agent → auto-commit → <c>dotnet test</c> → Pull Request.
+/// Runs an agent inside a managed Git lifecycle on the repository at <c>rootPath</c> (the harness's own or an external
+/// one): clean working tree → greenfield bootstrap → feature branch <c>feature/&lt;issue&gt;-&lt;slug&gt;</c> → spec/prompt
+/// → agent → auto-commit → the repository's <see cref="QualityGate"/> → Pull Request.
 /// Stops at the first failing stage. Progress is logged to the error writer; subprocess output is relayed as produced.
 /// </summary>
 public sealed class AgentOrchestrator
 {
-    public const string DotnetExecutable = "dotnet";
-    public static readonly IReadOnlyList<string> TestArguments = ["test"];
+    /// <summary>Commit that records the bootstrap scaffold on the base branch of a repository without commits.</summary>
+    public const string BootstrapCommitMessage = "chore: bootstrap AI Harness governance";
 
     private readonly IProcessRunner processRunner;
     private readonly string rootPath;
@@ -85,11 +92,28 @@ public sealed class AgentOrchestrator
             if (!await _git.IsWorkingTreeCleanAsync(cancellationToken))
                 return Fail(stage, 1, branch, "El directorio de trabajo tiene cambios sin confirmar; haga commit o stash antes de continuar.");
 
+            int exitCode;
+            // A repository without commits (e.g. freshly created on GitHub) has no base for the feature branch:
+            // its bootstrap becomes the first commit of the base branch.
+            var baseBranchCreated = !await _git.HasCommitsAsync(cancellationToken);
+            if (baseBranchCreated)
+            {
+                stage = OrchestrationStage.Bootstrap;
+                exitCode = await CreateBaseBranchAsync(cancellationToken);
+                if (exitCode != 0)
+                    return Fail(stage, exitCode, branch, $"No se pudo crear la rama base {_options.BaseBranch} con el bootstrap.");
+            }
+
             stage = OrchestrationStage.Branch;
             Info($"Rama de trabajo: {branch}");
-            var exitCode = await _git.CheckoutFeatureBranchAsync(branch, cancellationToken);
+            exitCode = await _git.CheckoutFeatureBranchAsync(branch, cancellationToken);
             if (exitCode != 0)
                 return Fail(stage, exitCode, branch, $"No se pudo crear/cambiar a la rama {branch}.");
+
+            // After the checkout, so a resumed feature branch that already carries the scaffold is not bootstrapped
+            // again; the scaffold is committed together with the agent's changes.
+            stage = OrchestrationStage.Bootstrap;
+            Bootstrap();
 
             stage = OrchestrationStage.Spec;
             var context = prepareContext();
@@ -119,14 +143,23 @@ public sealed class AgentOrchestrator
             }
 
             stage = OrchestrationStage.Tests;
-            Info($"Ejecutando '{GitAutomationService.FormatCommand(DotnetExecutable, TestArguments)}'...");
-            exitCode = await processRunner.RunAsync(
-                new ProcessRequest(DotnetExecutable, TestArguments, rootPath), output.Write, error.Write, cancellationToken);
-            if (exitCode != 0)
-                return Fail(stage, exitCode, branch, "Las pruebas fallaron; no se prepara el Pull Request.");
+            // Detected after the agent ran: in a greenfield repository the agent is the one that creates it.
+            var qualityGate = QualityGate.Detect(rootPath);
+            if (qualityGate is null)
+            {
+                Warn("No se detectó un Quality Gate (solución .NET, script 'test' de package.json o target 'test' del Makefile); se omite la validación.");
+            }
+            else
+            {
+                Info($"Ejecutando el Quality Gate '{qualityGate}'...");
+                exitCode = await processRunner.RunAsync(
+                    new ProcessRequest(qualityGate.Executable, qualityGate.Arguments, rootPath), output.Write, error.Write, cancellationToken);
+                if (exitCode != 0)
+                    return Fail(stage, exitCode, branch, "El Quality Gate falló; no se prepara el Pull Request.");
+            }
 
             stage = OrchestrationStage.PullRequest;
-            exitCode = await PublishAsync(spec, context.SpecFileName, branch, cancellationToken);
+            exitCode = await PublishAsync(spec, context.SpecFileName, branch, baseBranchCreated, cancellationToken);
             if (exitCode != 0)
                 return Fail(stage, exitCode, branch, "No se pudo crear el Pull Request.");
 
@@ -159,7 +192,26 @@ public sealed class AgentOrchestrator
         }
     }
 
-    private async Task<int> PublishAsync(SpecMetadata spec, string specFileName, string branch, CancellationToken cancellationToken)
+    /// <summary>Scaffolds the governance of a greenfield repository; does nothing when it already has a CLAUDE.md.</summary>
+    private void Bootstrap()
+    {
+        var created = new WorkspaceBootstrapper(rootPath, _options.AgentTemplatesDirectory).Bootstrap();
+        if (created.Count > 0)
+            Info($"Repositorio greenfield: se generó la gobernanza inicial ({string.Join(", ", created)}).");
+    }
+
+    /// <summary>Records the bootstrap as the first commit of the base branch of a repository without commits.</summary>
+    /// <returns>The exit code of the first git command that failed, or 0.</returns>
+    private async Task<int> CreateBaseBranchAsync(CancellationToken cancellationToken)
+    {
+        Bootstrap();
+        Info($"Repositorio sin commits: se crea {_options.BaseBranch} con el bootstrap como primer commit.");
+        var exitCode = await _git.SetUnbornBranchAsync(_options.BaseBranch, cancellationToken);
+        return exitCode != 0 ? exitCode : await _git.CommitAllAsync(BootstrapCommitMessage, cancellationToken);
+    }
+
+    private async Task<int> PublishAsync(
+        SpecMetadata spec, string specFileName, string branch, bool baseBranchCreated, CancellationToken cancellationToken)
     {
         if (await _git.CountCommitsAheadAsync(_options.BaseBranch, cancellationToken) == 0)
         {
@@ -171,19 +223,32 @@ public sealed class AgentOrchestrator
             _options.BaseBranch,
             branch,
             spec.Title,
-            $"Closes #{spec.IssueNumber}\n\nImplementa `openspec/specs/{specFileName}` (generado por AI Harness).");
+            $"Closes #{spec.IssueNumber}\n\nImplementa `openspec/specs/{specFileName}` (generado por AI Harness).",
+            _options.Repository);
 
         if (!_options.CreatePullRequest)
         {
             // Pushing needs explicit human approval: hand the prepared commands to the operator.
             Info("Pull Request preparado. Para publicarlo (requiere aprobación humana), ejecute:");
+            if (baseBranchCreated)
+                error.WriteLine($"  {GitAutomationService.FormatCommand(GitAutomationService.DefaultGitExecutable, GitAutomationService.PushArguments(_options.BaseBranch))}");
             error.WriteLine($"  {GitAutomationService.FormatCommand(GitAutomationService.DefaultGitExecutable, GitAutomationService.PushArguments(branch))}");
             error.WriteLine($"  {GitAutomationService.FormatCommand(GitAutomationService.DefaultGhExecutable, GitAutomationService.PullRequestArguments(request))}");
             return 0;
         }
 
+        int exitCode;
+        // A bootstrapped empty repository has no base branch on the remote yet; the PR needs one to target.
+        if (baseBranchCreated && !await _git.RemoteBranchExistsAsync(_options.BaseBranch, cancellationToken))
+        {
+            Info($"Publicando la rama base {_options.BaseBranch} en {GitAutomationService.Remote}...");
+            exitCode = await _git.PushAsync(_options.BaseBranch, cancellationToken);
+            if (exitCode != 0)
+                return exitCode;
+        }
+
         Info($"Publicando {branch} en {GitAutomationService.Remote}...");
-        var exitCode = await _git.PushAsync(branch, cancellationToken);
+        exitCode = await _git.PushAsync(branch, cancellationToken);
         if (exitCode != 0)
             return exitCode;
 

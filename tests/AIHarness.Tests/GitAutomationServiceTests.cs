@@ -100,4 +100,54 @@ public sealed class GitAutomationServiceTests
 
         Assert.Equal("gh pr create --title 'feat(x): it'\\''s done' --head feature/1-x", command);
     }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task HasCommitsAsync_IsFalseOnAnUnbornHead(int exitCode, bool expected)
+    {
+        var runner = new ScriptedProcessRunner().On("git rev-parse --verify --quiet HEAD", exitCode: exitCode);
+
+        Assert.Equal(expected, await Service(runner).HasCommitsAsync());
+    }
+
+    [Fact]
+    public async Task SetUnbornBranchAsync_PointsHeadAtTheBranch()
+    {
+        var runner = new ScriptedProcessRunner();
+
+        Assert.Equal(0, await Service(runner).SetUnbornBranchAsync("main"));
+        Assert.Equal(["git symbolic-ref HEAD refs/heads/main"], runner.CommandLines);
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(2, false)]
+    public async Task RemoteBranchExistsAsync_MapsLsRemoteExitCode(int exitCode, bool expected)
+    {
+        var runner = new ScriptedProcessRunner().On("git ls-remote --exit-code --heads origin main", exitCode: exitCode);
+
+        Assert.Equal(expected, await Service(runner).RemoteBranchExistsAsync("main"));
+    }
+
+    [Fact]
+    public async Task RemoteBranchExistsAsync_RemoteUnreachable_Throws()
+    {
+        var runner = new ScriptedProcessRunner().On("git ls-remote --exit-code --heads origin main", exitCode: 128);
+
+        var ex = await Assert.ThrowsAsync<GitAutomationException>(() => Service(runner).RemoteBranchExistsAsync("main"));
+
+        Assert.Equal(128, ex.ExitCode);
+    }
+
+    [Fact]
+    public void PullRequestArguments_TargetRepository_AddsRepoFlag()
+    {
+        var withoutRepo = GitAutomationService.PullRequestArguments(new PullRequestRequest("main", "feature/1-x", "feat: x", "Closes #1"));
+        var withRepo = GitAutomationService.PullRequestArguments(
+            new PullRequestRequest("main", "feature/1-x", "feat: x", "Closes #1", new AIHarness.GitHub.GitHubRepository("acme", "shop")));
+
+        Assert.DoesNotContain("--repo", withoutRepo);
+        Assert.Equal(withoutRepo.Concat(["--repo", "acme/shop"]), withRepo);
+    }
 }
