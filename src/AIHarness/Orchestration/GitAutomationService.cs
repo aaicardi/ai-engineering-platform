@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using AIHarness.Execution;
+using AIHarness.GitHub;
 
 namespace AIHarness.Orchestration;
 
@@ -52,6 +53,38 @@ public sealed class GitAutomationService(
         return exitCode != 0 ? exitCode : await RelayAsync(gitExecutable, ["commit", "-m", message], cancellationToken);
     }
 
+    /// <summary><c>false</c> on a repository without commits yet (unborn HEAD, e.g. a freshly created GitHub repository).</summary>
+    public async Task<bool> HasCommitsAsync(CancellationToken cancellationToken = default)
+    {
+        var (exitCode, _, _) = await CaptureAsync(["rev-parse", "--verify", "--quiet", "HEAD"], cancellationToken);
+        return exitCode == 0;
+    }
+
+    /// <summary>Names the branch the first commit of a repository without commits is recorded on.</summary>
+    /// <returns>The git exit code.</returns>
+    public Task<int> SetUnbornBranchAsync(string branch, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branch);
+        return RelayAsync(gitExecutable, ["symbolic-ref", "HEAD", $"refs/heads/{branch}"], cancellationToken);
+    }
+
+    /// <summary><c>true</c> when <paramref name="branch"/> exists on <see cref="Remote"/>.</summary>
+    /// <exception cref="GitAutomationException">git failed (e.g. the remote is unreachable).</exception>
+    public async Task<bool> RemoteBranchExistsAsync(string branch, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branch);
+
+        string[] arguments = ["ls-remote", "--exit-code", "--heads", Remote, branch];
+        var (exitCode, _, stderr) = await CaptureAsync(arguments, cancellationToken);
+        // --exit-code: 0 when the ref exists, 2 when it does not.
+        return exitCode switch
+        {
+            0 => true,
+            2 => false,
+            _ => throw new GitAutomationException(FormatCommand(gitExecutable, arguments), exitCode, stderr),
+        };
+    }
+
     /// <summary>Current branch name, or <c>null</c> on a detached HEAD.</summary>
     /// <exception cref="GitAutomationException">git failed.</exception>
     public async Task<string?> GetCurrentBranchAsync(CancellationToken cancellationToken = default)
@@ -92,7 +125,10 @@ public sealed class GitAutomationService(
 
     /// <summary>Command that opens the Pull Request for <paramref name="request"/>.</summary>
     public static string[] PullRequestArguments(PullRequestRequest request) =>
-        ["pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title, "--body", request.Body];
+    [
+        "pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title, "--body", request.Body,
+        .. (request.Repository is null ? Array.Empty<string>() : new[] { "--repo", request.Repository.ToString() }),
+    ];
 
     /// <summary>Pushes <paramref name="branch"/> to <see cref="Remote"/> and sets its upstream.</summary>
     /// <returns>The git exit code.</returns>
@@ -143,7 +179,8 @@ public sealed class GitAutomationService(
 }
 
 /// <summary>Parameters of <c>gh pr create</c>.</summary>
-public sealed record PullRequestRequest(string BaseBranch, string HeadBranch, string Title, string Body);
+/// <param name="Repository">Repository the PR is opened on; <c>null</c> lets gh infer it from the working directory.</param>
+public sealed record PullRequestRequest(string BaseBranch, string HeadBranch, string Title, string Body, GitHubRepository? Repository = null);
 
 public sealed class GitAutomationException(string command, int exitCode, string detail)
     : Exception($"'{command}' falló con código {exitCode}{(detail.Length == 0 ? "." : $": {detail}")}")

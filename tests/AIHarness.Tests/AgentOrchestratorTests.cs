@@ -47,6 +47,9 @@ public sealed class AgentOrchestratorTests : IDisposable
         var specs = Directory.CreateDirectory(Path.Combine(_root, "openspec", "specs"));
         File.WriteAllText(Path.Combine(specs.FullName, SpecFileName),
             "# OpenSpec 008: feat(orchestration): Add Git Automation\n\n## Issue Reference\nCloses #27\n");
+        // A governed .NET repository: no bootstrap, quality gate `dotnet test`.
+        File.WriteAllText(Path.Combine(_root, "CLAUDE.md"), "# Governance\n");
+        File.WriteAllText(Path.Combine(_root, "App.sln"), "");
     }
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
@@ -73,6 +76,7 @@ public sealed class AgentOrchestratorTests : IDisposable
         Assert.Equal(
             [
                 "git status --porcelain --untracked-files=no",
+                "git rev-parse --verify --quiet HEAD",
                 "git rev-parse --abbrev-ref HEAD",
                 $"git rev-parse --verify --quiet refs/heads/{Branch}",
                 $"git checkout -b {Branch}",
@@ -384,6 +388,142 @@ public sealed class AgentOrchestratorTests : IDisposable
         Assert.Equal(OrchestrationStage.Spec, result.Stage);
         Assert.Equal(1, result.ExitCode);
         Assert.DoesNotContain(runner.Requests, r => r.FileName == "claude");
+    }
+
+    [Fact]
+    public async Task RunAsync_QualityGate_IsDetectedFromTheTargetRepository()
+    {
+        File.Delete(Path.Combine(_root, "App.sln"));
+        File.WriteAllText(Path.Combine(_root, "package.json"), """{ "scripts": { "test": "vitest run" } }""");
+        var runner = HappyPath();
+
+        var result = await RunAsync(runner);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("npm test", runner.CommandLines);
+        Assert.DoesNotContain("dotnet test", runner.CommandLines);
+        Assert.Equal(_root, Assert.Single(runner.Requests, r => r.FileName == "npm").WorkingDirectory);
+    }
+
+    [Fact]
+    public async Task RunAsync_NoQualityGate_WarnsAndStillPreparesThePullRequest()
+    {
+        File.Delete(Path.Combine(_root, "App.sln"));
+        var runner = HappyPath();
+
+        var result = await RunAsync(runner);
+
+        Assert.True(result.Succeeded);
+        Assert.DoesNotContain("dotnet test", runner.CommandLines);
+        Assert.Contains("[WARN] No se detectó un Quality Gate", _error.ToString());
+        Assert.Contains("gh pr create", _error.ToString());
+    }
+
+    [Fact]
+    public async Task RunAsync_TargetRepository_OpensThePullRequestOnIt()
+    {
+        var runner = HappyPath();
+
+        var result = await RunAsync(runner, new OrchestrationOptions(CreatePullRequest: true, Repository: new GitHubRepository("acme", "shop")));
+
+        Assert.True(result.Succeeded);
+        var pr = runner.Requests[^1];
+        Assert.Equal("gh", pr.FileName);
+        Assert.Equal(["--repo", "acme/shop"], pr.Arguments.TakeLast(2));
+        Assert.Equal(_root, pr.WorkingDirectory);
+    }
+
+    private string CreateAgentTemplates()
+    {
+        var templates = Directory.CreateDirectory(Path.Combine(_root, "..", Path.GetFileName(_root) + "-templates")).FullName;
+        File.WriteAllText(Path.Combine(templates, "developer.md"), "# Agent: Developer\n");
+        return templates;
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_GreenfieldRepositoryWithHistory_BootstrapsOnTheFeatureBranchBeforeBuildingThePrompt()
+    {
+        File.Delete(Path.Combine(_root, "CLAUDE.md"));
+        var templates = CreateAgentTemplates();
+        try
+        {
+            var runner = IssueHappyPath();
+            var governedWhenBuilt = false;
+
+            var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error, new OrchestrationOptions(AgentTemplatesDirectory: templates))
+                .ProcessIssueAsync(Issue, spec =>
+                {
+                    governedWhenBuilt = File.Exists(Path.Combine(_root, "CLAUDE.md"))
+                        && File.Exists(Path.Combine(_root, ".claude", "agents", "developer.md"));
+                    return new PromptContext("developer", spec, "# Prompt");
+                });
+
+            Assert.True(result.Succeeded);
+            Assert.True(governedWhenBuilt);
+            // The repository has history: the scaffold is committed with the agent's changes, not on the base branch.
+            Assert.DoesNotContain(runner.CommandLines, c => c.StartsWith("git symbolic-ref", StringComparison.Ordinal));
+            Assert.DoesNotContain(runner.Requests, r => r.Arguments.Contains(AgentOrchestrator.BootstrapCommitMessage));
+            Assert.Equal(_root, Assert.Single(runner.Requests, r => r.FileName == "claude").WorkingDirectory);
+            Assert.Contains("Repositorio greenfield", _error.ToString());
+        }
+        finally
+        {
+            Directory.Delete(templates, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_RepositoryWithoutCommits_CreatesTheBaseBranchWithTheBootstrapAndPublishesIt()
+    {
+        File.Delete(Path.Combine(_root, "CLAUDE.md"));
+        var runner = IssueHappyPath()
+            .On("git rev-parse --verify --quiet HEAD", exitCode: 1)
+            .On("git ls-remote --exit-code --heads origin main", exitCode: 2);
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error, new OrchestrationOptions(CreatePullRequest: true))
+            .ProcessIssueAsync(Issue, spec => new PromptContext("developer", spec, "# Prompt"));
+
+        Assert.True(result.Succeeded);
+        Assert.True(File.Exists(Path.Combine(_root, "CLAUDE.md")));
+        var commands = runner.CommandLines.ToList();
+        var symbolicRef = commands.IndexOf("git symbolic-ref HEAD refs/heads/main");
+        Assert.True(symbolicRef > 0);
+        Assert.Equal("git add --all", commands[symbolicRef + 1]);
+        Assert.Equal(["commit", "-m", AgentOrchestrator.BootstrapCommitMessage], runner.Requests[symbolicRef + 2].Arguments);
+        Assert.True(commands.IndexOf($"git checkout -b {IssueBranch}") > symbolicRef + 2);
+        // The remote has no base branch yet: it is published before the feature branch so the PR has a target.
+        Assert.Equal(
+            ["git ls-remote --exit-code --heads origin main", "git push --set-upstream origin main", $"git push --set-upstream origin {IssueBranch}"],
+            commands.TakeLast(4).Take(3));
+        Assert.Equal("gh", runner.Requests[^1].FileName);
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_RepositoryWithoutCommits_PrintsTheBaseBranchPushWhenNotPublishing()
+    {
+        var runner = IssueHappyPath().On("git rev-parse --verify --quiet HEAD", exitCode: 1);
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, spec => new PromptContext("developer", spec, "# Prompt"));
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("git push --set-upstream origin main", _error.ToString());
+        Assert.DoesNotContain(runner.CommandLines, c => c.StartsWith("git push", StringComparison.Ordinal) || c.StartsWith("git ls-remote", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ProcessIssueAsync_BaseBranchBootstrapFails_StopsBeforeCreatingTheFeatureBranch()
+    {
+        var runner = IssueHappyPath()
+            .On("git rev-parse --verify --quiet HEAD", exitCode: 1)
+            .On("git symbolic-ref HEAD refs/heads/main", exitCode: 128);
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, spec => new PromptContext("developer", spec, "# Prompt"));
+
+        Assert.Equal(OrchestrationStage.Bootstrap, result.Stage);
+        Assert.Equal(128, result.ExitCode);
+        Assert.DoesNotContain(runner.CommandLines, c => c.StartsWith("git checkout", StringComparison.Ordinal));
     }
 
     private sealed class ThrowingProcessRunner : IProcessRunner

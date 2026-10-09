@@ -21,11 +21,15 @@ using AIHarness.Specs;
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
 //   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
-//   AIHarness --process-issue <number> [--agent <name>] [--repo <owner/name>] [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
+//   AIHarness --process-issue <number> [--agent <name>] [--repo <owner/name>] [--target-dir <dir>] [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
 //                                                                -> pipeline completo: obtiene el Issue, crea/cambia a
 //                                                                   feature/<issue>-<slug>, genera (o reutiliza) la spec, ejecuta
 //                                                                   el agente (developer por defecto), confirma sus cambios,
-//                                                                   ejecuta dotnet test y prepara el PR (--create-pr lo publica)
+//                                                                   ejecuta el Quality Gate del repositorio (dotnet test, npm test
+//                                                                   o make test) y prepara el PR (--create-pr lo publica).
+//                                                                   Workspace destino: --target-dir, o ~/.aiharness/workspaces/<owner>/<name>
+//                                                                   si --repo es otro repositorio (se clona si no existe); un
+//                                                                   repositorio sin CLAUDE.md recibe el bootstrap greenfield
 //   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
 //   AIHarness --status                                           -> estado: versión, runtime, SO y uptime del sistema
 // Without a root, it is discovered by walking up from the current directory.
@@ -43,7 +47,8 @@ if (args.Contains("--status"))
 }
 
 const string DefaultAgent = "developer";
-string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null, processIssueArg = null;
+string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null, processIssueArg = null,
+    targetDirArg = null;
 var save = true;
 var generateSpec = false;
 var execute = false;
@@ -65,6 +70,7 @@ for (var i = 0; i < args.Length; i++)
         case "--orchestrate": orchestrate = true; break;
         case "--create-pr": createPr = true; break;
         case "--process-issue" when i + 1 < args.Length: processIssueArg = args[++i]; break;
+        case "--target-dir" when i + 1 < args.Length: targetDirArg = args[++i]; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
@@ -87,8 +93,13 @@ if (processIssueArg is not null)
         Console.Error.WriteLine("[ERROR] No se encontró la raíz del repositorio (directorio con CLAUDE.md).");
         return 1;
     }
-    return await ProcessIssueAsync(processIssueArg, repoArg, issueRoot, agentArg ?? DefaultAgent, save,
-        new OrchestrationOptions(baseArg ?? "main", createPr));
+    return await ProcessIssueAsync(processIssueArg, repoArg, targetDirArg, issueRoot, agentArg ?? DefaultAgent, save, baseArg ?? "main", createPr);
+}
+
+if (targetDirArg is not null)
+{
+    Console.Error.WriteLine("[ERROR] --target-dir requiere --process-issue.");
+    return 2;
 }
 
 if ((baseArg is not null || createPr) && !orchestrate)
@@ -229,16 +240,60 @@ static CancellationTokenSource CancelOnCtrlC()
 static Task<int> OrchestrateAsync(PromptContext context, string root, OrchestrationOptions options) =>
     RunOrchestratorAsync(root, options, (orchestrator, ct) => orchestrator.RunAsync(context, ct));
 
-static async Task<int> ProcessIssueAsync(string issueArg, string? repoArg, string root, string agent, bool save, OrchestrationOptions options)
+// The harness root provides the agent definitions and receives the exported prompt; the target workspace
+// (the harness itself or an external repository) is where the agent runs and the PR is opened.
+static async Task<int> ProcessIssueAsync(
+    string issueArg, string? repoArg, string? targetDirArg, string harnessRoot, string agent, bool save, string baseBranch, bool createPr)
 {
-    var (issue, _, exitCode) = await FetchIssueAsync(issueArg, repoArg, root);
+    GitHubRepository? repository = null;
+    if (repoArg is not null && !GitHubRepository.TryParse(repoArg, out repository))
+    {
+        Console.Error.WriteLine($"[ERROR] Repositorio inválido: {repoArg} (formato esperado: owner/name).");
+        return 2;
+    }
+
+    var workspace = TargetWorkspace.Resolve(harnessRoot, repository, targetDirArg,
+        GitHubConnector.ResolveRepositoryFromGit(harnessRoot), TargetWorkspace.DefaultWorkspacesHome);
+    if (!workspace.RequiresClone)
+    {
+        if (!Directory.Exists(workspace.RootPath))
+        {
+            Console.Error.WriteLine($"[ERROR] El directorio destino no existe: {workspace.RootPath}. Indique --repo <owner/name> para clonarlo.");
+            return 1;
+        }
+        // The Issue, the working copy and the PR must all belong to the same repository.
+        var origin = GitHubConnector.ResolveRepositoryFromGit(workspace.RootPath);
+        if (repository is not null && origin is not null && !repository.Matches(origin))
+        {
+            Console.Error.WriteLine($"[ERROR] {workspace.RootPath} es un clon de {origin}, no de {repository}.");
+            return 2;
+        }
+    }
+
+    var (issue, issueRepository, exitCode) = await FetchIssueAsync(issueArg, repoArg, workspace.RootPath);
     if (issue is null)
         return exitCode;
+    workspace = workspace with { Repository = issueRepository };
     Console.Error.WriteLine($"[INFO] Issue #{issue.Number}: {issue.Title}");
+    Console.Error.WriteLine($"[INFO] Workspace destino: {workspace.RootPath} ({workspace.Repository})");
 
-    var builder = new ContextBuilder(root);
-    return await RunOrchestratorAsync(root, options, (orchestrator, ct) =>
-        orchestrator.ProcessIssueAsync(issue, spec => BuildPrompt(builder, root, agent, spec, save, print: false), ct));
+    var agentsDir = Path.Combine(harnessRoot, ".claude", "agents");
+    var builder = new ContextBuilder(workspace.RootPath, agentsDir);
+    var options = new OrchestrationOptions(baseBranch, createPr, workspace.Repository, agentsDir);
+    return await RunOrchestratorAsync(workspace.RootPath, options, async (orchestrator, ct) =>
+    {
+        if (workspace.RequiresClone)
+        {
+            Console.Error.WriteLine($"[INFO] Clonando {workspace.Repository} en {workspace.RootPath}...");
+            var cloneExitCode = await workspace.CloneAsync(new AIHarness.Execution.ProcessRunner(), Console.Out, Console.Error, ct);
+            if (cloneExitCode != 0)
+            {
+                Console.Error.WriteLine($"[ERROR] No se pudo clonar {workspace.Repository} (código {cloneExitCode}).");
+                return new OrchestrationResult(OrchestrationStage.Preflight, cloneExitCode);
+            }
+        }
+        return await orchestrator.ProcessIssueAsync(issue, spec => BuildPrompt(builder, harnessRoot, agent, spec, save, print: false), ct);
+    });
 }
 
 static async Task<int> RunOrchestratorAsync(
@@ -252,6 +307,11 @@ static async Task<int> RunOrchestratorAsync(
         if (result.Succeeded)
             Console.Error.WriteLine($"[INFO] Orquestación completada en la rama {result.Branch}.");
         return result.ExitCode;
+    }
+    catch (ExecutableNotFoundException ex)
+    {
+        Console.Error.WriteLine($"[ERROR] {ex.Message}");
+        return 127;
     }
     catch (OperationCanceledException)
     {

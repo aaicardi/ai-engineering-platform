@@ -6,7 +6,12 @@ namespace AIHarness.Prompting;
 /// File-system implementation of <see cref="IContextBuilder"/> rooted at the repository directory.
 /// Performs no console output so it can be reused by other front-ends.
 /// </summary>
-public sealed class ContextBuilder(string rootPath) : IContextBuilder
+/// <param name="rootPath">Repository whose CLAUDE.md, agents and specs are merged.</param>
+/// <param name="fallbackAgentsDirectory">
+/// Agent definitions used when the repository does not define the agent itself (e.g. the harness's own
+/// <c>.claude/agents</c> when working on an external repository).
+/// </param>
+public sealed class ContextBuilder(string rootPath, string? fallbackAgentsDirectory = null) : IContextBuilder
 {
     public static readonly string DefaultOutputRelativePath = Path.Combine(".claude", "tmp", "current-prompt.md");
 
@@ -20,9 +25,10 @@ public sealed class ContextBuilder(string rootPath) : IContextBuilder
             throw new GovernanceNotFoundException(claudeMdPath);
 
         var agentsDir = Path.Combine(rootPath, ".claude", "agents");
-        var agentPath = Path.Combine(agentsDir, agentName + ".md");
-        if (!File.Exists(agentPath))
-            throw new AgentNotFoundException(agentName, agentPath, ListAgents(agentsDir));
+        var agentDirs = fallbackAgentsDirectory is null ? new[] { agentsDir } : new[] { agentsDir, fallbackAgentsDirectory };
+        var agentPath = agentDirs.Select(d => Path.Combine(d, agentName + ".md")).FirstOrDefault(p => File.Exists(p))
+            ?? throw new AgentNotFoundException(agentName, Path.Combine(agentsDir, agentName + ".md"),
+                agentDirs.SelectMany(d => ListAgents(d)).Distinct().Order().ToList());
 
         var specFileName = specName.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ? specName : specName + ".md";
         var specPath = Path.Combine(rootPath, "openspec", "specs", specFileName);

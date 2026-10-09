@@ -8,6 +8,10 @@ public sealed partial record GitHubRepository(string Owner, string Name)
 {
     public override string ToString() => $"{Owner}/{Name}";
 
+    /// <summary>Same repository as <paramref name="other"/>; GitHub owner and repository names are case-insensitive.</summary>
+    public bool Matches(GitHubRepository? other) =>
+        other is not null && string.Equals(ToString(), other.ToString(), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Parses <c>owner/name</c>.</summary>
     public static bool TryParse(string? value, [NotNullWhen(true)] out GitHubRepository? repository)
     {

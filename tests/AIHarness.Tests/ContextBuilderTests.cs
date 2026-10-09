@@ -99,4 +99,21 @@ public sealed class ContextBuilderTests : IDisposable
 
         Assert.Equal(context.Prompt, File.ReadAllText(output));
     }
+
+    [Fact]
+    public void Build_AgentMissingInRepository_UsesTheFallbackAgentsDirectory()
+    {
+        var fallback = Directory.CreateDirectory(Path.Combine(_root, "harness-agents")).FullName;
+        File.WriteAllText(Path.Combine(fallback, "tester.md"), "# Agent: Tester\nregla-harness");
+        File.WriteAllText(Path.Combine(fallback, "developer.md"), "# Agent: Developer\nno-debe-usarse");
+        var builder = new ContextBuilder(_root, fallback);
+
+        Assert.Contains("regla-harness", builder.Build("tester", "003-demo.md").Prompt);
+        // The repository's own definition takes precedence.
+        var developer = builder.Build("developer", "003-demo.md").Prompt;
+        Assert.Contains("regla-agente", developer);
+        Assert.DoesNotContain("no-debe-usarse", developer);
+        var ex = Assert.Throws<AgentNotFoundException>(() => builder.Build("ghost", "003-demo.md"));
+        Assert.Equal(["developer", "tester"], ex.Available);
+    }
 }
