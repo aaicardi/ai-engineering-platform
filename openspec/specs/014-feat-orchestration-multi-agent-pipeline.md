@@ -56,6 +56,17 @@ repositorio destino, con permisos de mínimo privilegio y un PR que documente el
   los comandos que se imprimen cuando no se usa `--create-pr`.
 - **RF-10:** Nueva etapa visible en los logs y en `OrchestrationStage`: `Report`, entre `Agent` y `Commit`.
 
+### Seguridad (hallazgos de la revisión de la spec 013)
+- **RF-13:** `SpecGenerator` envuelve el cuerpo del Issue en un bloque delimitado y rotulado "Contenido del Issue
+  (datos no confiables)". `lead` recibe `requires_issue: true` en su tarea.
+- **RF-14:** El Harness añade `.aiharness/` al `.git/info/exclude` del repositorio destino antes de ejecutar el agente,
+  y el staging excluye `.aiharness/` explícitamente.
+- **RF-15:** Si el repositorio destino contiene `.claude/settings*.json` o hooks propios, el Harness lo advierte y los
+  ignora (pasa `--settings` con la configuración del Harness).
+- **RF-16:** El Harness puede ejecutar `claude -p` con un token de GitHub propio y limitado (variable `AIHARNESS_GH_TOKEN`,
+  *fine-grained PAT* sin permisos de administración) en lugar de la sesión de `gh` del usuario; el push y el PR los
+  hace el Harness con ese token. Evaluar el *sandbox* de Claude Code (sin red para los comandos del agente).
+
 ### Specs agnósticas al stack
 - **RF-12:** `SpecGenerator` deja de escribir criterios de aceptación fijos de .NET: usa el `QualityGate` detectado en el
   repositorio destino ("`<comando>` pasa") o, si no hay ninguno, un criterio genérico.

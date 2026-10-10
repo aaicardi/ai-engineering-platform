@@ -11,11 +11,35 @@
       "Bash(git log:*)",
       "Bash(git show:*)"
     ],
+    "ask": [
+      "Edit(/.claude/**)",
+      "Edit(/.github/**)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git reset:*)",
+      "Bash(git stash:*)",
+      "Bash(git clean:*)",
+      "Bash(git restore:*)",
+      "Bash(git -C:*)",
+      "Bash(git -c:*)"
+    ],
     "deny": [
       "Bash(git push:*)",
       "Bash(gh pr merge:*)",
-      "Read(./.env)",
-      "Read(./.env.*)"
+      "Bash(gh auth token:*)",
+      "Bash(git diff --no-index*)",
+      "Bash(git diff * --no-index*)",
+      "Bash(git diff --output*)",
+      "Bash(git diff * --output*)",
+      "Bash(git log --output*)",
+      "Bash(git log * --output*)",
+      "Bash(git show --output*)",
+      "Bash(git show * --output*)",
+      "Edit(/.git/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.config/gh/**)"
     ]
   }
 }

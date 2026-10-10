@@ -68,13 +68,25 @@ public sealed class RepositoryInspector(string rootPath)
 
         var agents = ExpectedAgents
             .Select(a => found.Contains(a)
-                ? new AgentEntry(a, true, AgentDefinition.Parse(File.ReadAllText(Path.Combine(dir, a + ".md"))).Validate(a))
+                ? new AgentEntry(a, true, ValidateAgent(Path.Combine(dir, a + ".md"), a))
                 : Missing(a))
             .ToList();
         var unexpected = found.Except(ExpectedAgents, StringComparer.Ordinal).Order().ToList();
         return new AgentsAudit(true, agents, unexpected);
 
         static AgentEntry Missing(string name) => new(name, false, ["no existe"]);
+    }
+
+    private static IReadOnlyList<string> ValidateAgent(string path, string name)
+    {
+        try
+        {
+            return AgentDefinition.Parse(AgentDefinition.ReadFile(path)).Validate(name);
+        }
+        catch (InvalidDataException ex)
+        {
+            return [ex.Message];
+        }
     }
 
     private SpecsAudit InspectSpecs()

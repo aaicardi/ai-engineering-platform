@@ -21,7 +21,7 @@ Las specs escritas a mano pueden añadir `## Architecture & Components`, `## Tas
 | Comprobación | Si falla |
 |---|---|
 | H1 `# OpenSpec NNN: <título>` y nombre de archivo `NNN-<slug>.md` | NOT_READY |
-| `Closes #N` (o `Fixes`/`Resolves`) — obligatorio cuando la ejecuta AI Harness | NOT_READY |
+| `Closes #N` (o `Fixes`/`Resolves`) | Si quien invoca indica `requires_issue: true` → NOT_READY; si no, se anota en `issues` sin cambiar el veredicto |
 | Sección de requerimientos con al menos un `RF-XX` | NOT_READY |
 | Sección de criterios de aceptación con al menos un elemento | NOT_READY |
 

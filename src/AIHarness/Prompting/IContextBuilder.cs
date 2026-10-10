@@ -16,6 +16,7 @@ public interface IContextBuilder
     /// <exception cref="GovernanceNotFoundException">CLAUDE.md does not exist.</exception>
     /// <exception cref="AgentNotFoundException">The agent file does not exist.</exception>
     /// <exception cref="SpecNotFoundException">The spec file does not exist.</exception>
+    /// <exception cref="InvalidDataException">The agent file is a symbolic link or too large.</exception>
     PromptContext Build(string agentName, string specName);
 
     /// <summary>Writes the prompt to <paramref name="outputPath"/>, creating parent directories.</summary>

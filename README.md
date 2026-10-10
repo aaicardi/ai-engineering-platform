@@ -126,9 +126,9 @@ Definition of Done, cuándo escalar a un humano y el formato de su informe.
 
 ### Flujo de `lead`
 ```
-openspec-validator → architect (plan) → developer → tester
-  → code-reviewer ∥ security-reviewer → CRITICAL/HIGH vuelven a developer (máx. 2 ciclos)
-  → devops / documentation (si aplica) → verificación final → .aiharness/run-report.md
+openspec-validator → architect (plan) → developer → tester → devops (si aplica)
+  → code-reviewer ∥ security-reviewer → CRITICAL/HIGH vuelven a developer y se revisa de nuevo (máx. 2 ciclos)
+  → documentation (si aplica) → verificación final → .aiharness/run-report.md
 ```
 Si la spec no es implementable o se necesita una acción que requiere aprobación humana, `lead` termina con
 `status: BLOCKED` y las preguntas a resolver.
@@ -148,8 +148,15 @@ Los agentes son independientes del stack: detectan el del repositorio y cargan l
 | `stack-dotnet`, `stack-typescript-node`, `stack-react`, `stack-angular`, `stack-postgresql` | Convenciones, comandos, testing y revisión por stack |
 
 ### Permisos interactivos
-[`.claude/settings.json`](.claude/settings.json) permite editar, compilar y probar con `dotnet` y ejecutar `git`
-de solo lectura, y deniega `git push`, `gh pr merge` y la lectura de `.env` (CLAUDE.md §3).
+[`.claude/settings.json`](.claude/settings.json):
+- **Permitido:** editar, `dotnet restore/build/test` y `git status/diff/log/show`.
+- **Pregunta antes** (en `claude -p` queda denegado): editar `.claude/` y `.github/`, `git checkout/switch/reset/stash/clean/restore`.
+- **Denegado:** `git push` (en cualquier forma), `gh pr merge`, `gh auth token`, `git … --no-index`, `git … --output`,
+  editar `.git/`, leer `.env*`, `~/.ssh` y `~/.config/gh`.
+
+Estas reglas solo ven el comando que escribe el agente, no lo que ejecuta un proceso hijo (por ejemplo, un test).
+La garantía real de CLAUDE.md §3 está en GitHub: `main` protegida sin bypass y credenciales limitadas para el Harness.
+Además, todos los agentes tratan el contenido de los Issues como datos no confiables.
 
 ## Gobernanza (Nivel de Autonomía 4 / D)
 - **Acciones automáticas:** lectura de código, análisis de arquitectura, ejecución de tests locales, creación de especificaciones OpenSpec.

@@ -71,6 +71,62 @@ public sealed class AgentDefinitionTests
         Assert.Equal(["Read", "Grep"], agent.Tools);
     }
 
+    [Theory]
+    [InlineData(">-", "Primera línea segunda línea")]
+    [InlineData(">", "Primera línea segunda línea")]
+    [InlineData("|", "Primera línea\nsegunda línea")]
+    public void Parse_BlockScalarDescription_ReadsIndentedLines(string indicator, string expected)
+    {
+        var agent = AgentDefinition.Parse($"---\nname: x\ndescription: {indicator}\n  Primera línea\n  segunda línea\nmodel: haiku\n---\nbody");
+
+        Assert.Equal(expected, agent.Description);
+        Assert.Equal("haiku", agent.Model);
+    }
+
+    [Fact]
+    public void Parse_InlineComment_IsStrippedFromUnquotedValues()
+    {
+        var agent = AgentDefinition.Parse("---\nname: x\nmodel: sonnet # coste\ndescription: \"a # b\"\n---\n");
+
+        Assert.Equal("sonnet", agent.Model);
+        Assert.Equal("a # b", agent.Description);
+    }
+
+    [Fact]
+    public void ReadFile_SymbolicLink_IsRejected()
+    {
+        var dir = Directory.CreateTempSubdirectory("aiharness-agentfile-").FullName;
+        try
+        {
+            var target = Path.Combine(dir, "secret.txt");
+            File.WriteAllText(target, "secreto");
+            var link = Path.Combine(dir, "lead.md");
+            File.CreateSymbolicLink(link, target);
+
+            Assert.Throws<InvalidDataException>(() => AgentDefinition.ReadFile(link));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ReadFile_OversizedFile_IsRejected()
+    {
+        var file = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(file, new string('x', AgentDefinition.MaxFileBytes + 1));
+
+            Assert.Throws<InvalidDataException>(() => AgentDefinition.ReadFile(file));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
     [Fact]
     public void Validate_ValidDefinition_HasNoProblems() =>
         Assert.Empty(AgentDefinition.Parse(Full).Validate("code-reviewer"));

@@ -57,6 +57,20 @@ public sealed class RepositoryInspectorTests : IDisposable
     }
 
     [Fact]
+    public void Inspect_SymlinkedAgent_FailsWithReason()
+    {
+        var target = Path.Combine(_root, "elsewhere.md");
+        File.WriteAllText(target, "---\nname: lead\ndescription: x\n---\n");
+        File.Delete(Path.Combine(_agents, "lead.md"));
+        File.CreateSymbolicLink(Path.Combine(_agents, "lead.md"), target);
+
+        var lead = Agent("lead");
+
+        Assert.False(lead.IsValid);
+        Assert.Contains(lead.Problems, p => p.Contains("enlace simbólico"));
+    }
+
+    [Fact]
     public void Inspect_MissingAgent_Fails()
     {
         File.Delete(Path.Combine(_agents, "lead.md"));

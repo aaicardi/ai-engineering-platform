@@ -8,7 +8,9 @@ description: Convenciones de esquema, migraciones (crearlas, nunca aplicarlas), 
 Úsala junto a la skill del lenguaje (`stack-dotnet`, `stack-typescript-node`). Las convenciones del repositorio prevalecen.
 
 ## Regla de gobernanza
-**Las migraciones se crean y se revisan; nunca se aplican** desde un agente (CLAUDE.md §3).
+**Las migraciones se crean y se revisan; nunca se aplican contra una base de datos compartida o persistente** desde un
+agente (CLAUDE.md §3). La única excepción son las bases **efímeras de test** que la propia suite crea y destruye
+(p. ej. Testcontainers).
 - Sí: `dotnet ef migrations add <Nombre>`, crear el archivo de migración de la herramienta del repositorio
   (Flyway, Knex, Prisma `migrate dev --create-only`, TypeORM `migration:generate`...).
 - No: `dotnet ef database update`, `prisma migrate deploy`, `knex migrate:latest`, `psql` contra bases compartidas.
@@ -36,8 +38,8 @@ description: Convenciones de esquema, migraciones (crearlas, nunca aplicarlas), 
 - Transacciones cortas; el nivel de aislamiento por defecto salvo motivo documentado.
 
 ## Tests
-- Contra una base de datos efímera (Testcontainers, contenedor de `docker-compose` de desarrollo o la estrategia del repositorio),
-  nunca contra una base compartida.
+- Contra una base de datos efímera creada y destruida por la propia suite (Testcontainers o la estrategia del repositorio).
+  Nunca contra una base compartida ni contra la base de `docker-compose` de desarrollo, que es persistente.
 - Verifica que la migración aplica y revierte en la base efímera cuando el repositorio tenga esa infraestructura.
 
 ## Revisión

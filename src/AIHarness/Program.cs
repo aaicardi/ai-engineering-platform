@@ -207,7 +207,7 @@ static PromptContext? BuildPrompt(IContextBuilder builder, string root, string a
     {
         context = builder.Build(agent, spec);
     }
-    catch (Exception ex) when (ex is ContextSourceNotFoundException or ArgumentException)
+    catch (Exception ex) when (ex is ContextSourceNotFoundException or ArgumentException or InvalidDataException)
     {
         Console.Error.WriteLine($"[ERROR] {ex.Message}");
         return null;
