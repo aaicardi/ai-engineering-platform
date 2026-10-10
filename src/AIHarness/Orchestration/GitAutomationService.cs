@@ -126,7 +126,8 @@ public sealed class GitAutomationService(
     /// <summary>Command that opens the Pull Request for <paramref name="request"/>.</summary>
     public static string[] PullRequestArguments(PullRequestRequest request) =>
     [
-        "pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title, "--body", request.Body,
+        "pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title,
+        .. (request.BodyFile is null ? new[] { "--body", request.Body } : new[] { "--body-file", request.BodyFile }),
         .. (request.Repository is null ? Array.Empty<string>() : new[] { "--repo", request.Repository.ToString() }),
     ];
 
@@ -180,7 +181,9 @@ public sealed class GitAutomationService(
 
 /// <summary>Parameters of <c>gh pr create</c>.</summary>
 /// <param name="Repository">Repository the PR is opened on; <c>null</c> lets gh infer it from the working directory.</param>
-public sealed record PullRequestRequest(string BaseBranch, string HeadBranch, string Title, string Body, GitHubRepository? Repository = null);
+/// <param name="BodyFile">File holding <paramref name="Body"/>; when set, gh reads the description from it (<c>--body-file</c>).</param>
+public sealed record PullRequestRequest(
+    string BaseBranch, string HeadBranch, string Title, string Body, GitHubRepository? Repository = null, string? BodyFile = null);
 
 public sealed class GitAutomationException(string command, int exitCode, string detail)
     : Exception($"'{command}' falló con código {exitCode}{(detail.Length == 0 ? "." : $": {detail}")}")

@@ -24,7 +24,9 @@ using AIHarness.Specs;
 //   AIHarness --process-issue <number> [--agent <name>] [--repo <owner/name>] [--target-dir <dir>] [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
 //                                                                -> pipeline completo: obtiene el Issue, crea/cambia a
 //                                                                   feature/<issue>-<slug>, genera (o reutiliza) la spec, ejecuta
-//                                                                   el agente (developer por defecto), confirma sus cambios,
+//                                                                   la suite de agentes coordinada por lead (o --agent <name>)
+//                                                                   aislada de la configuración del destino (ADR-001), lee su
+//                                                                   informe (status BLOCKED -> código 3), confirma los cambios,
 //                                                                   ejecuta el Quality Gate del repositorio (dotnet test, npm test
 //                                                                   o make test) y prepara el PR (--create-pr lo publica).
 //                                                                   Workspace destino: --target-dir, o ~/.aiharness/workspaces/<owner>/<name>
@@ -46,7 +48,8 @@ if (args.Contains("--status"))
     return 0;
 }
 
-const string DefaultAgent = "developer";
+// --process-issue runs the whole agent suite, coordinated by lead (spec 014).
+const string DefaultProcessIssueAgent = "lead";
 string? agentArg = null, specArg = null, rootArg = null, issueArg = null, repoArg = null, baseArg = null, processIssueArg = null,
     targetDirArg = null;
 var save = true;
@@ -93,7 +96,7 @@ if (processIssueArg is not null)
         Console.Error.WriteLine("[ERROR] No se encontró la raíz del repositorio (directorio con CLAUDE.md).");
         return 1;
     }
-    return await ProcessIssueAsync(processIssueArg, repoArg, targetDirArg, issueRoot, agentArg ?? DefaultAgent, save, baseArg ?? "main", createPr);
+    return await ProcessIssueAsync(processIssueArg, repoArg, targetDirArg, issueRoot, agentArg ?? DefaultProcessIssueAgent, save, baseArg ?? "main", createPr);
 }
 
 if (targetDirArg is not null)
@@ -279,7 +282,12 @@ static async Task<int> ProcessIssueAsync(
 
     var agentsDir = Path.Combine(harnessRoot, ".claude", "agents");
     var builder = new ContextBuilder(workspace.RootPath, agentsDir);
-    var options = new OrchestrationOptions(baseBranch, createPr, workspace.Repository, agentsDir);
+    // The suite runs isolated from the target's Claude Code configuration; its files live outside the target (ADR-001).
+    var runDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".aiharness", "runs",
+        workspace.Repository?.Owner ?? "local", workspace.Repository?.Name ?? Path.GetFileName(workspace.RootPath),
+        issue.Number.ToString(System.Globalization.CultureInfo.InvariantCulture), DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture));
+    var options = new OrchestrationOptions(baseBranch, createPr, workspace.Repository, agentsDir,
+        () => AgentSession.Prepare(harnessRoot, workspace.RootPath, runDirectory, agent));
     return await RunOrchestratorAsync(workspace.RootPath, options, async (orchestrator, ct) =>
     {
         if (workspace.RequiresClone)
@@ -328,7 +336,7 @@ static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
     Console.Error.WriteLine($"[INFO] Ejecutando agente '{context.AgentName}' con {context.SpecFileName} vía '{AgentRunner.DefaultExecutable} {string.Join(' ', AgentRunner.CliArguments)}'...");
     try
     {
-        var exitCode = await runner.RunAsync(context, cts.Token);
+        var exitCode = await runner.RunAsync(context, cancellationToken: cts.Token);
         Console.Error.WriteLine(exitCode == 0
             ? "[INFO] El agente finalizó correctamente."
             : $"[ERROR] El agente finalizó con código de salida {exitCode}.");

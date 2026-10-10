@@ -22,13 +22,14 @@ public sealed class AgentRunner(
     public static readonly IReadOnlyList<string> CliArguments = ["-p"];
 
     /// <summary>Runs the agent and returns the CLI exit code.</summary>
+    /// <param name="arguments">CLI arguments; <see cref="CliArguments"/> when <c>null</c>. The prompt always goes to STDIN.</param>
     /// <exception cref="ExecutableNotFoundException">The Claude CLI is not installed or not on the PATH.</exception>
     /// <exception cref="OperationCanceledException">Cancelled; the CLI process has been killed.</exception>
-    public Task<int> RunAsync(PromptContext context, CancellationToken cancellationToken = default)
+    public Task<int> RunAsync(PromptContext context, IReadOnlyList<string>? arguments = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var request = new ProcessRequest(executable, CliArguments, workingDirectory, context.Prompt);
+        var request = new ProcessRequest(executable, arguments ?? CliArguments, workingDirectory, context.Prompt);
         return processRunner.RunAsync(request, Relay(output), Relay(error), cancellationToken);
     }
 

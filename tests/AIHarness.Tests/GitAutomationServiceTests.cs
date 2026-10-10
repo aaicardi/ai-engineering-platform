@@ -141,6 +141,17 @@ public sealed class GitAutomationServiceTests
     }
 
     [Fact]
+    public void PullRequestArguments_BodyFile_ReplacesTheInlineBody()
+    {
+        var arguments = GitAutomationService.PullRequestArguments(
+            new PullRequestRequest("main", "feature/1-x", "feat: x", "Closes #1", BodyFile: "/runs/1/pr-body.md"));
+
+        Assert.Equal(
+            ["pr", "create", "--base", "main", "--head", "feature/1-x", "--title", "feat: x", "--body-file", "/runs/1/pr-body.md"],
+            arguments);
+    }
+
+    [Fact]
     public void PullRequestArguments_TargetRepository_AddsRepoFlag()
     {
         var withoutRepo = GitAutomationService.PullRequestArguments(new PullRequestRequest("main", "feature/1-x", "feat: x", "Closes #1"));

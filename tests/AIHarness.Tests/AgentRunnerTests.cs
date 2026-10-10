@@ -23,6 +23,17 @@ public sealed class AgentRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_WithArguments_UsesThemAndKeepsThePromptOnStandardInput()
+    {
+        var fake = new FakeProcessRunner();
+
+        await new AgentRunner(fake, "/repo", TextWriter.Null, TextWriter.Null).RunAsync(Context, ["-p", "--agent", "lead"]);
+
+        Assert.Equal(["-p", "--agent", "lead"], fake.Request!.Arguments);
+        Assert.Equal(Context.Prompt, fake.Request.StandardInput);
+    }
+
+    [Fact]
     public async Task RunAsync_LaunchesClaudeCliWithPromptOnStandardInput()
     {
         var fake = new FakeProcessRunner();
@@ -76,7 +87,7 @@ public sealed class AgentRunnerTests
         var fake = new FakeProcessRunner();
         using var cts = new CancellationTokenSource();
 
-        await new AgentRunner(fake, "/repo", TextWriter.Null, TextWriter.Null).RunAsync(Context, cts.Token);
+        await new AgentRunner(fake, "/repo", TextWriter.Null, TextWriter.Null).RunAsync(Context, cancellationToken: cts.Token);
 
         Assert.Equal(cts.Token, fake.Token);
     }
