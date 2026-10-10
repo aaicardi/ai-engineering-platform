@@ -81,7 +81,7 @@ public sealed class RepositoryInspector(string rootPath)
     {
         try
         {
-            return AgentDefinition.Parse(AgentDefinition.ReadFile(path)).Validate(name);
+            return AgentDefinition.Parse(SafeFile.ReadText(path)).Validate(name);
         }
         catch (InvalidDataException ex)
         {

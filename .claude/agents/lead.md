@@ -78,6 +78,8 @@ Termina con `status: BLOCKED` (sin seguir delegando) cuando:
 - La única forma de avanzar es una acción de CLAUDE.md §3 (push, merge, migración aplicada, secreto, despliegue).
 - La suite de tests falla por causas ajenas a este cambio y no se puede aislar.
 - Tras 2 ciclos de corrección sigue habiendo un hallazgo `CRITICAL`.
+- Un agente no puede completar su parte porque los permisos de la sesión deniegan la edición necesaria (p. ej. `devops`
+  sobre `.github/**`): incluye en *Blockers* el diff que propuso para que una persona lo aplique.
 
 ## Report Format
 `.aiharness/run-report.md` (y el mismo contenido como mensaje final):

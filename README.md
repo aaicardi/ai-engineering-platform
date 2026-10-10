@@ -150,9 +150,11 @@ Los agentes son independientes del stack: detectan el del repositorio y cargan l
 ### Permisos interactivos
 [`.claude/settings.json`](.claude/settings.json):
 - **Permitido:** editar, `dotnet restore/build/test` y `git status/diff/log/show`.
-- **Pregunta antes** (en `claude -p` queda denegado): editar `.claude/` y `.github/`, `git checkout/switch/reset/stash/clean/restore`.
-- **Denegado:** `git push` (en cualquier forma), `gh pr merge`, `gh auth token`, `git … --no-index`, `git … --output`,
-  editar `.git/`, leer `.env*`, `~/.ssh` y `~/.config/gh`.
+- **Pregunta antes** (en `claude -p` queda denegado): editar `.claude/`, `.github/`, `CLAUDE.md`, `.mcp.json` y archivos
+  de build compartidos (`Directory.Build.*`, `*.targets`, `NuGet.config`); `git checkout/switch/reset/stash/clean/restore`
+  y opciones globales de git (`git -C`, `git -c`, `git --…`).
+- **Denegado:** `git push`, `gh pr merge`, `gh auth token`, `git diff` sobre rutas fuera del repositorio o con
+  `--no-index`, `git … --output`, editar `.git/` y la configuración global de git, leer `.env*`, `~/.ssh` y `~/.config/gh`.
 
 Estas reglas solo ven el comando que escribe el agente, no lo que ejecuta un proceso hijo (por ejemplo, un test).
 La garantía real de CLAUDE.md §3 está en GitHub: `main` protegida sin bypass y credenciales limitadas para el Harness.

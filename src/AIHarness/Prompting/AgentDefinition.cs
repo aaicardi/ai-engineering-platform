@@ -86,30 +86,18 @@ public sealed record AgentDefinition(
         return problems;
     }
 
-    /// <summary>
-    /// Reads an agent definition file for parsing. Agent files may come from an external repository, so symbolic
-    /// links (which could point at any local file) and oversized files are rejected.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The file is a symbolic link or larger than <see cref="MaxFileBytes"/>.</exception>
-    public static string ReadFile(string path)
-    {
-        var file = new FileInfo(path);
-        if (file.LinkTarget is not null)
-            throw new InvalidDataException($"La definición de agente '{path}' es un enlace simbólico; no se permite.");
-        if (file.Length > MaxFileBytes)
-            throw new InvalidDataException($"La definición de agente '{path}' supera {MaxFileBytes / 1024} KB.");
-        return File.ReadAllText(path);
-    }
-
-    /// <summary>Largest agent definition accepted by <see cref="ReadFile"/>.</summary>
-    public const int MaxFileBytes = 256 * 1024;
-
-    // A plain or quoted scalar; an unquoted value ends at an inline ` #` comment.
+    // A quoted scalar ends at its closing quote (anything after it, such as a comment, is dropped);
+    // an unquoted one ends at an inline comment (`#` at the start or after a space).
     private static string Scalar(string value)
     {
         value = value.Trim();
-        if (value.Length >= 2 && (value[0] == '"' && value[^1] == '"' || value[0] == '\'' && value[^1] == '\''))
-            return value[1..^1];
+        if (value.Length > 0 && value[0] is '"' or '\'')
+        {
+            var close = value.IndexOf(value[0], 1);
+            return close > 0 ? value[1..close] : value;
+        }
+        if (value.StartsWith('#'))
+            return string.Empty;
         var comment = value.IndexOf(" #", StringComparison.Ordinal);
         return comment < 0 ? value : value[..comment].TrimEnd();
     }

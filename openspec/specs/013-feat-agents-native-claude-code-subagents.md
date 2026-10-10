@@ -114,14 +114,25 @@ Esta spec construye la **suite de agentes** (contenido y configuración). La spe
 - **RF-13:** `.claude/settings.json` (sesiones interactivas en este repositorio), verificado con `claude -p`:
   - Eliminar los nombres inválidos `FileEdit` y `FileWrite`.
   - `allow`: `Edit`, `Write`, `dotnet restore/build/test`, `git status/diff/log/show`.
-  - `ask` (en `claude -p` equivale a denegar): editar `.claude/**` y `.github/**`; `git checkout/switch/reset/stash/clean/restore`.
-  - `deny`: `git push` (también `git -C … push`), `gh pr merge`, `gh auth token`, `git … --no-index`, `git … --output`,
-    editar `.git/**`, leer `**/.env*`, `~/.ssh/**` y `~/.config/gh/**`.
+  - `ask` (en `claude -p` equivale a denegar): editar `.claude/**`, `.github/**`, `CLAUDE.md`, `.mcp.json`, `.vscode/**`,
+    `global.json`, `NuGet.config`, `Directory.Build.*`, `*.targets`; `git checkout/switch/reset/stash/clean/restore`;
+    opciones globales de git antes del subcomando (`git -C`, `git -c`, `git --*`).
+  - `deny`: `git push`, `gh pr merge`, `gh auth token`, `git diff` con rutas fuera del repositorio (`/…`, `~…`, `../`,
+    que activan el modo *no-index* implícito) o con `--no-index`, `git diff/log/show --output`, editar `.git/**`,
+    `~/.gitconfig` y `~/.config/git/**`, leer `**/.env*`, `~/.ssh/**` y `~/.config/gh/**`.
   - **Limitación:** las reglas solo ven el comando que escribe el agente, no lo que ejecuta un proceso hijo
     (p. ej. código de un test lanzado por `dotnet test`). CLAUDE.md §3 se garantiza con credenciales y con la
     protección de ramas de GitHub; ver spec 014.
-- **RF-15:** `AgentDefinition.ReadFile` rechaza enlaces simbólicos y archivos de más de 256 KB; el parser soporta
-  escalares de bloque YAML (`>`, `|`) y comentarios en línea.
+- **RF-15:** `SafeFile.ReadText` rechaza enlaces simbólicos y archivos de más de 256 KB; lo usan `ContextBuilder`
+  (CLAUDE.md, agente y spec) y `RepositoryInspector`. El parser soporta escalares de bloque YAML (`>`, `|`), valores
+  entrecomillados y comentarios en línea.
+
+### Limitaciones conocidas (riesgo aceptado hasta la spec 014)
+| Riesgo | Mitigación actual | Corrección |
+|---|---|---|
+| Código escrito por un agente se ejecuta sin aprobación en `dotnet build/test` y puede hacer lo que las reglas no ven (push, red, leer credenciales) | Instrucciones en `developer`/`tester`; contenido del Issue tratado como no confiable | `main` sin bypass (acción humana) + token limitado y *sandbox* (014, RF-16) |
+| `code-reviewer`/`security-reviewer` tienen `Bash`; su "solo lectura" depende de `settings.json` y de la obediencia del modelo | `deny`/`ask` de comandos destructivos y de lectura fuera del repositorio | Hook `PreToolUse` por agente o *sandbox* (014) |
+| `*.csproj` y `package.json` siguen siendo editables sin aprobación (pueden definir comandos de build) | Instrucciones en `developer` | *Sandbox* sin red (014) |
 - **RF-14:** Añadir `.aiharness/` a `.gitignore` (ningún informe se versiona).
 
 ## Architecture & Components

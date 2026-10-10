@@ -48,6 +48,17 @@ public sealed class ContextBuilderTests : IDisposable
     }
 
     [Fact]
+    public void Build_SymlinkedClaudeMd_IsRejected()
+    {
+        var target = Path.Combine(_root, "outside.txt");
+        File.WriteAllText(target, "secreto");
+        File.Delete(Path.Combine(_root, "CLAUDE.md"));
+        File.CreateSymbolicLink(Path.Combine(_root, "CLAUDE.md"), target);
+
+        Assert.Throws<InvalidDataException>(() => Builder.Build("developer", "003-demo.md"));
+    }
+
+    [Fact]
     public void Build_UnknownAgent_ThrowsAgentNotFoundWithAvailableAgents()
     {
         var ex = Assert.Throws<AgentNotFoundException>(() => Builder.Build("ghost", "003-demo.md"));

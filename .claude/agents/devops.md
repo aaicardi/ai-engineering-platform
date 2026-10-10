@@ -51,6 +51,10 @@ Que el código se construya, pruebe y ejecute igual en local y en CI, con la con
 Responde `BLOCKED` si el cambio exige crear secretos, cambiar reglas de protección de GitHub, desplegar o tocar
 infraestructura compartida (CLAUDE.md §3).
 
+Si los permisos de la sesión deniegan editar un archivo (p. ej. `.github/**` en una ejecución no interactiva), no
+busques otra vía (Bash, otra ruta): responde `BLOCKED` con el diff completo que propones en `human_actions`, para que
+una persona lo aplique.
+
 ## Report Format
 ```markdown
 status: DONE | BLOCKED

@@ -84,6 +84,15 @@ public sealed class AgentDefinitionTests
     }
 
     [Fact]
+    public void Parse_QuotedValueWithInlineComment_Unquotes()
+    {
+        var agent = AgentDefinition.Parse("---\nname: \"lead\" # coordinador\nmodel: #vacío\n---\n");
+
+        Assert.Equal("lead", agent.Name);
+        Assert.Null(agent.Model);
+    }
+
+    [Fact]
     public void Parse_InlineComment_IsStrippedFromUnquotedValues()
     {
         var agent = AgentDefinition.Parse("---\nname: x\nmodel: sonnet # coste\ndescription: \"a # b\"\n---\n");
@@ -103,7 +112,7 @@ public sealed class AgentDefinitionTests
             var link = Path.Combine(dir, "lead.md");
             File.CreateSymbolicLink(link, target);
 
-            Assert.Throws<InvalidDataException>(() => AgentDefinition.ReadFile(link));
+            Assert.Throws<InvalidDataException>(() => SafeFile.ReadText(link));
         }
         finally
         {
@@ -117,9 +126,9 @@ public sealed class AgentDefinitionTests
         var file = Path.GetTempFileName();
         try
         {
-            File.WriteAllText(file, new string('x', AgentDefinition.MaxFileBytes + 1));
+            File.WriteAllText(file, new string('x', SafeFile.MaxBytes + 1));
 
-            Assert.Throws<InvalidDataException>(() => AgentDefinition.ReadFile(file));
+            Assert.Throws<InvalidDataException>(() => SafeFile.ReadText(file));
         }
         finally
         {
