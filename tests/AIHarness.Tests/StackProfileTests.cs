@@ -41,9 +41,19 @@ public sealed class StackProfileTests : IDisposable
         var profile = StackProfile.Detect(_root);
 
         Assert.Empty(profile.Stacks);
-        Assert.Contains("Bash(dotnet new:*)", profile.AllowedCommands);
-        Assert.Contains("Bash(npm init:*)", profile.AllowedCommands);
+        Assert.Contains("Bash(dotnet new classlib:*)", profile.AllowedCommands);
+        Assert.Contains("Bash(npm init -y:*)", profile.AllowedCommands);
         Assert.Contains("Bash(make test:*)", profile.AllowedCommands);
+    }
+
+    [Fact]
+    public void Detect_NeverAllowsNpxOrTemplateInstalls()
+    {
+        var profile = StackProfile.Detect(_root);
+
+        Assert.DoesNotContain(profile.AllowedCommands, c => c.StartsWith("Bash(npx tsc", StringComparison.Ordinal) || c.StartsWith("Bash(npx vitest", StringComparison.Ordinal));
+        Assert.DoesNotContain("Bash(dotnet new:*)", profile.AllowedCommands);
+        Assert.DoesNotContain("Bash(npm init:*)", profile.AllowedCommands);
     }
 
     [Fact]

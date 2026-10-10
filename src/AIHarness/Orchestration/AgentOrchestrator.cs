@@ -50,6 +50,9 @@ public sealed class AgentOrchestrator
     /// <summary>Exit code when the agent reports <c>status: BLOCKED</c>: it needs a human decision, not a retry.</summary>
     public const int BlockedExitCode = 3;
 
+    /// <summary>The coordinator agent, the only one required to write a run report.</summary>
+    public const string LeadAgent = "lead";
+
     private readonly OrchestrationOptions _options;
     private readonly GitAutomationService _git;
 
@@ -98,7 +101,12 @@ public sealed class AgentOrchestrator
             branch = spec.BranchName;
 
             if (!await _git.IsWorkingTreeCleanAsync(cancellationToken))
-                return Fail(stage, 1, branch, "El directorio de trabajo tiene cambios sin confirmar; haga commit o stash antes de continuar.");
+            {
+                // A run stopped by BLOCKED leaves the agent's work uncommitted on its feature branch: resuming continues it.
+                if (await _git.GetCurrentBranchAsync(cancellationToken) != branch)
+                    return Fail(stage, 1, branch, "El directorio de trabajo tiene cambios sin confirmar; haga commit o stash antes de continuar.");
+                Info($"Se retoma la rama {branch} con los cambios sin confirmar de la ejecución anterior.");
+            }
 
             int exitCode;
             // A repository without commits (e.g. freshly created on GitHub) has no base for the feature branch:
@@ -132,17 +140,36 @@ public sealed class AgentOrchestrator
 
             stage = OrchestrationStage.Agent;
             var session = _options.SessionFactory?.Invoke();
-            exitCode = await RunAgentAsync(context, session, cancellationToken);
-            if (exitCode != 0)
-                return Fail(stage, exitCode, branch, $"El agente finalizó con código de salida {exitCode}.");
+            RunReport? report = null;
+            if (session is not null)
+                await PrepareReportDirectoryAsync(session, cancellationToken);
+            try
+            {
+                exitCode = await RunAgentAsync(context, session, cancellationToken);
+                if (exitCode != 0)
+                    return Fail(stage, exitCode, branch, $"El agente finalizó con código de salida {exitCode}.");
 
-            stage = OrchestrationStage.Report;
-            var report = CollectReport(session);
-            if (report?.Status == RunReportStatus.Blocked)
+                // Only a session agent is asked for a report; a stale one from an interactive run is never read.
+                stage = OrchestrationStage.Report;
+                if (session is not null)
+                    report = CollectReport(session);
+            }
+            finally
+            {
+                // The report directory must never reach a commit, whatever happened to the agent.
+                if (session is not null)
+                    DeleteReportDirectory();
+            }
+
+            if (report is null && session?.AgentName == LeadAgent)
+                return Fail(stage, BlockedExitCode, branch,
+                    $"El agente {LeadAgent} no dejó el informe {RunReport.RelativePath}; sin él no se puede saber si terminó ni qué revisaron los agentes, así que no se confirma ni se publica. Vuelva a ejecutar el mismo comando para retomar.");
+            if (report is not null && report.Status != RunReportStatus.Completed)
             {
                 error.WriteLine(report.Section("Blockers") ?? report.Body);
-                return Fail(stage, BlockedExitCode, branch,
-                    "El agente terminó con status: BLOCKED; se necesita una decisión humana. La rama queda lista para retomar.");
+                return Fail(stage, BlockedExitCode, branch, report.Status == RunReportStatus.Blocked
+                    ? $"El agente terminó con status: BLOCKED; se necesita una decisión humana. Para retomar, resuelva los bloqueos y vuelva a ejecutar el mismo comando: la rama {branch} conserva los cambios sin confirmar."
+                    : $"El informe del agente no indica 'status: COMPLETED' ni 'status: BLOCKED'; por seguridad no se confirma ni se publica. Revise el informe en la carpeta de la ejecución y vuelva a ejecutar el mismo comando para retomar.");
             }
 
             stage = OrchestrationStage.Commit;
@@ -182,7 +209,8 @@ public sealed class AgentOrchestrator
 
             return new OrchestrationResult(OrchestrationStage.Completed, 0, branch);
         }
-        catch (Exception ex) when (ex is GitAutomationException or ExecutableNotFoundException or InvalidDataException or IOException)
+        catch (Exception ex) when (ex is GitAutomationException or ExecutableNotFoundException or InvalidDataException or IOException
+                                       or UnauthorizedAccessException)
         {
             return Fail(stage, ex is ExecutableNotFoundException ? 127 : 1, branch, ex.Message);
         }
@@ -242,7 +270,6 @@ public sealed class AgentOrchestrator
 
         foreach (var warning in session.Warnings)
             Warn(warning);
-        ExcludeFromGit(RunReport.DirectoryName + "/");
         var task = context with { Prompt = AgentTask(context.SpecFileName) };
         File.WriteAllText(Path.Combine(session.RunDirectory, "task.md"), task.Prompt);
         Info($"Ejecutando la suite de agentes ('{session.AgentName}', stack: {(session.Stack.Stacks.Count == 0 ? "sin detectar" : string.Join(", ", session.Stack.Stacks))}) con {context.SpecFileName}...");
@@ -261,39 +288,75 @@ public sealed class AgentOrchestrator
         - Al terminar, escribe el informe en `.aiharness/run-report.md` con el formato de tu sección *Report Format*.
         """;
 
-    /// <summary>Reads, archives and removes the agent's report so it never reaches a commit.</summary>
-    private RunReport? CollectReport(AgentSession? session)
+    /// <summary>
+    /// Keeps <c>.aiharness/</c> out of git and out of this run: a leftover from an earlier run (an interrupted one, or an
+    /// interactive <c>claude --agent lead</c>) is archived in the run directory and removed, so it is never read as this
+    /// run's report.
+    /// </summary>
+    private async Task PrepareReportDirectoryAsync(AgentSession session, CancellationToken cancellationToken)
+    {
+        // A versioned .aiharness/ would be deleted by the cleanup (and the deletion committed) or could plant a report.
+        if ((await _git.ListTrackedFilesAsync(RunReport.DirectoryName, cancellationToken)).Length > 0)
+            throw new InvalidDataException($"El repositorio destino versiona {RunReport.DirectoryName}/, que AI Harness reserva para sus informes; elimínelo del repositorio antes de continuar.");
+
+        var exclude = await _git.GetGitPathAsync("info/exclude", cancellationToken);
+        if (exclude.Length > 0)
+            AppendLineOnce(Path.Combine(rootPath, exclude), RunReport.DirectoryName + "/");
+
+        var leftover = Path.Combine(rootPath, RunReport.DirectoryName);
+        if (!Directory.Exists(leftover))
+            return;
+        if (new DirectoryInfo(leftover).LinkTarget is not null)
+        {
+            Directory.Delete(leftover);
+            Warn($"Se eliminó el enlace simbólico {RunReport.DirectoryName} del repositorio destino.");
+            return;
+        }
+        var archive = Path.Combine(session.RunDirectory, "previous-aiharness");
+        foreach (var file in Directory.GetFiles(leftover, "*", SearchOption.AllDirectories))
+        {
+            var destination = Path.Combine(archive, Path.GetRelativePath(leftover, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            File.Copy(file, destination, overwrite: true);
+        }
+        Directory.Delete(leftover, recursive: true);
+        Warn($"Se archivó un {RunReport.DirectoryName}/ de una ejecución anterior en {archive}; no se usa en esta ejecución.");
+    }
+
+    private void DeleteReportDirectory()
+    {
+        var directory = Path.Combine(rootPath, RunReport.DirectoryName);
+        if (!Directory.Exists(directory))
+            return;
+        // A link is removed itself; its target is never walked.
+        if (new DirectoryInfo(directory).LinkTarget is not null)
+            Directory.Delete(directory);
+        else
+            Directory.Delete(directory, recursive: true);
+    }
+
+    /// <summary>Reads the session agent's report and archives it in the run directory.</summary>
+    private RunReport? CollectReport(AgentSession session)
     {
         var path = Path.Combine(rootPath, RunReport.RelativePath);
+        // Only lead is required to write one (a missing one stops the pipeline); a single specialist (--agent) may not.
         if (!File.Exists(path))
-        {
-            if (session is not null)
-                Warn($"El agente no dejó el informe {RunReport.RelativePath}; el Pull Request usará la descripción por defecto.");
             return null;
-        }
 
         var report = RunReport.Parse(SafeFile.ReadText(path));
-        if (session is not null)
-            File.Copy(path, Path.Combine(session.RunDirectory, "run-report.md"), overwrite: true);
-        Directory.Delete(Path.Combine(rootPath, RunReport.DirectoryName), recursive: true);
-        if (report.Status == RunReportStatus.Unknown)
-            Warn($"El informe {RunReport.RelativePath} no indica 'status: COMPLETED | BLOCKED'.");
-        else
-            Info($"Informe del agente: {report.Status}.");
+        File.Copy(path, Path.Combine(session.RunDirectory, "run-report.md"), overwrite: true);
+        Info($"Informe del agente: {report.Status}.");
         return report;
     }
 
-    /// <summary>Adds <paramref name="pattern"/> to the repository's local exclude file (never versioned).</summary>
-    private void ExcludeFromGit(string pattern)
+    /// <summary>Adds <paramref name="line"/> to <paramref name="path"/> unless it is already there.</summary>
+    private static void AppendLineOnce(string path, string line)
     {
-        var infoDir = Path.Combine(rootPath, ".git", "info");
-        if (!Directory.Exists(Path.Combine(rootPath, ".git")))
+        var content = File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+        if (content.ReplaceLineEndings("\n").Split('\n').Contains(line))
             return;
-        Directory.CreateDirectory(infoDir);
-        var exclude = Path.Combine(infoDir, "exclude");
-        var lines = File.Exists(exclude) ? File.ReadAllLines(exclude) : [];
-        if (!lines.Contains(pattern))
-            File.AppendAllText(exclude, (lines.Length > 0 && !File.ReadAllText(exclude).EndsWith('\n') ? "\n" : "") + pattern + "\n");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.AppendAllText(path, (content.Length > 0 && !content.EndsWith('\n') ? "\n" : "") + line + "\n");
     }
 
     private async Task<int> PublishAsync(
@@ -307,8 +370,15 @@ public sealed class AgentOrchestrator
         }
 
         var body = $"Closes #{spec.IssueNumber}\n\nImplementa `openspec/specs/{specFileName}` (generado por AI Harness).";
-        if (report is not null)
-            body += $"\n\n## Informe de ejecución\n\n{report.Body}";
+        if (report is not null && session is not null)
+        {
+            var archived = Path.Combine(session.RunDirectory, "run-report.md");
+            // Model-written text published under the operator's identity: never a credential, never extra Issue closings.
+            if (report.ContainsSecretLikeText)
+                Warn($"El informe del agente contiene texto con forma de credencial; no se incluye en el Pull Request. Revíselo en {archived}.");
+            else
+                body += $"\n\n## Informe de ejecución\n\n{report.ForPullRequest(archived)}";
+        }
         // A file keeps a long description out of argv and lets the printed `gh pr create` command reuse it.
         string? bodyFile = null;
         if (session is not null)

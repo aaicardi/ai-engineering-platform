@@ -33,8 +33,39 @@ public sealed class RunReportTests
         Assert.Equal(RunReportStatus.Blocked, RunReport.Parse(content).Status);
 
     [Theory]
+    [InlineData("estado: COMPLETADO")]
+    [InlineData("**Status:** completed")]
+    public void Parse_SpanishAndEmphasizedCompleted_IsCompleted(string content) =>
+        Assert.Equal(RunReportStatus.Completed, RunReport.Parse(content).Status);
+
+    [Fact]
+    public void Parse_BlockedInSpanish_IsBlocked() =>
+        Assert.Equal(RunReportStatus.Blocked, RunReport.Parse("estado: BLOQUEADO").Status);
+
+    [Fact]
+    public void Parse_ReportWrappedInAFence_DropsTheFence()
+    {
+        var report = RunReport.Parse("```markdown\nstatus: BLOCKED\n\n## Blockers\nFalta X\n```");
+
+        Assert.Equal("Falta X", report.Section("Blockers"));
+        Assert.DoesNotContain("```", report.Body);
+    }
+
+    [Fact]
+    public void ForPullRequest_TruncatesLongReports()
+    {
+        var report = RunReport.Parse("status: COMPLETED\n" + new string('x', RunReport.MaxPullRequestLength + 10));
+
+        var text = report.ForPullRequest("/runs/1/run-report.md");
+
+        Assert.True(text.Length < RunReport.MaxPullRequestLength + 200);
+        Assert.Contains("/runs/1/run-report.md", text);
+    }
+
+    [Theory]
     [InlineData("## Summary\nsin estado")]
     [InlineData("status: DONE")]
+    [InlineData("status: COMPLETED | BLOCKED")]
     public void Parse_MissingOrUnknownStatus_IsUnknown(string content) =>
         Assert.Equal(RunReportStatus.Unknown, RunReport.Parse(content).Status);
 

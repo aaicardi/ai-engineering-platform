@@ -21,15 +21,14 @@ public sealed record StackProfile(IReadOnlyList<string> Stacks, IReadOnlyList<st
     {
         [DotNet] =
         [
-            "dotnet restore", "dotnet build", "dotnet test", "dotnet format", "dotnet new", "dotnet sln",
+            "dotnet restore", "dotnet build", "dotnet test", "dotnet format", "dotnet new sln", "dotnet new classlib",
+            "dotnet new console", "dotnet new webapi", "dotnet new xunit", "dotnet new gitignore", "dotnet sln",
             "dotnet add", "dotnet list package", "dotnet ef migrations add",
         ],
-        [Node] =
-        [
-            "npm ci", "npm install", "npm init", "npm test", "npm run build", "npm run test", "npm run lint",
-            "npm audit", "npx tsc", "npx vitest", "npx jest", "npx eslint",
-        ],
-        [Angular] = ["npx ng build", "npx ng test", "npx ng lint", "npx ng generate", "npx ng new"],
+        // `npm run` covers the repository's own scripts (build, lint, tsc...); `npx` is not allowed because it downloads
+        // and runs any package that is not installed.
+        [Node] = ["npm ci", "npm install", "npm init -y", "npm test", "npm run", "npm audit"],
+        [Angular] = ["npm run ng", "npx ng build", "npx ng test", "npx ng lint", "npx ng generate"],
         [Make] = ["make test", "make build"],
     };
 

@@ -5,17 +5,27 @@ using AIHarness.Prompting;
 
 namespace AIHarness.Tests;
 
-/// <summary><see cref="ScriptedProcessRunner"/> whose <c>claude</c> launches write the agent's report into the repository.</summary>
-internal sealed class ReportingProcessRunner(ScriptedProcessRunner inner, string root, string? report) : IProcessRunner
+/// <summary>
+/// <see cref="ScriptedProcessRunner"/> whose <c>claude</c> launches write the agent's report into the repository, and
+/// that records whether <c>.aiharness/</c> still existed when changes were staged.
+/// </summary>
+internal sealed class ReportingProcessRunner(ScriptedProcessRunner inner, string root, string? report, int claudeExitCode = 0) : IProcessRunner
 {
-    public Task<int> RunAsync(ProcessRequest request, Action<string> onStandardOutput, Action<string> onStandardError, CancellationToken cancellationToken = default)
+    public bool ReportDirectoryExistedAtStaging { get; private set; }
+
+    public async Task<int> RunAsync(ProcessRequest request, Action<string> onStandardOutput, Action<string> onStandardError, CancellationToken cancellationToken = default)
     {
-        if (request.FileName == "claude" && report is not null)
+        if (request.FileName == "git" && request.Arguments.FirstOrDefault() == "add")
+            ReportDirectoryExistedAtStaging |= Directory.Exists(Path.Combine(root, RunReport.DirectoryName));
+        var exitCode = await inner.RunAsync(request, onStandardOutput, onStandardError, cancellationToken);
+        if (request.FileName != "claude")
+            return exitCode;
+        if (report is not null)
         {
             Directory.CreateDirectory(Path.Combine(root, RunReport.DirectoryName));
             File.WriteAllText(Path.Combine(root, RunReport.RelativePath), report);
         }
-        return inner.RunAsync(request, onStandardOutput, onStandardError, cancellationToken);
+        return claudeExitCode;
     }
 }
 
@@ -43,19 +53,27 @@ public sealed class OrchestratorSessionTests : IDisposable
         .On("git rev-parse --abbrev-ref HEAD", stdout: "main\n")
         .On($"git rev-parse --verify --quiet refs/heads/{Branch}", exitCode: 1)
         .On("git status --porcelain", stdout: " M src/Export.cs\n")
-        .On("git rev-list --count main..HEAD", stdout: "1\n");
+        .On("git rev-list --count main..HEAD", stdout: "1\n")
+        .On("git rev-parse --git-path info/exclude", stdout: ".git/info/exclude\n");
+
+    private ReportingProcessRunner? _lastRunner;
 
     private async Task<(OrchestrationResult Result, ScriptedProcessRunner Runner, AgentSession? Session)> RunAsync(
-        string? report, bool createPr = false)
+        string? report, bool createPr = false, string agent = "lead", bool withSession = true, int claudeExitCode = 0,
+        Action<ScriptedProcessRunner>? script = null)
     {
         var scripted = HappyPath();
+        script?.Invoke(scripted);
         AgentSession? session = null;
         var options = new OrchestrationOptions(CreatePullRequest: createPr, Repository: new GitHubRepository("acme", "shop"),
-            SessionFactory: () => session = _suite.Prepare());
-        var orchestrator = new AgentOrchestrator(new ReportingProcessRunner(scripted, Root, report), Root, TextWriter.Null, _error, options);
-        var result = await orchestrator.RunAsync(new PromptContext("lead", SpecFileName, "# Prompt unificado"));
+            SessionFactory: withSession ? () => session = _suite.Prepare(agent) : null);
+        _lastRunner = new ReportingProcessRunner(scripted, Root, report, claudeExitCode);
+        var orchestrator = new AgentOrchestrator(_lastRunner, Root, TextWriter.Null, _error, options);
+        var result = await orchestrator.RunAsync(new PromptContext(agent, SpecFileName, "# Prompt unificado"));
         return (result, scripted, session);
     }
+
+    private bool ReportDirectoryExists => Directory.Exists(Path.Combine(Root, RunReport.DirectoryName));
 
     private const string CompletedReport = "status: COMPLETED\n\n## Summary\nExporta a CSV.\n\n## Open Findings\n- LOW · CR-1 · a.cs:3 — nombre\n";
 
@@ -89,7 +107,8 @@ public sealed class OrchestratorSessionTests : IDisposable
         var (result, runner, session) = await RunAsync(CompletedReport);
 
         Assert.True(result.Succeeded);
-        Assert.False(Directory.Exists(Path.Combine(Root, RunReport.DirectoryName)));
+        Assert.False(ReportDirectoryExists);
+        Assert.False(_lastRunner!.ReportDirectoryExistedAtStaging);
         Assert.Equal(CompletedReport, File.ReadAllText(Path.Combine(session!.RunDirectory, "run-report.md")));
 
         var body = File.ReadAllText(Path.Combine(session.RunDirectory, "pr-body.md"));
@@ -129,13 +148,103 @@ public sealed class OrchestratorSessionTests : IDisposable
     }
 
     [Fact]
-    public async Task MissingReport_WarnsAndContinuesWithTheDefaultDescription()
+    public async Task MissingReportFromLead_StopsWithExitCode3()
     {
-        var (result, _, session) = await RunAsync(report: null);
+        var (result, runner, _) = await RunAsync(report: null);
+
+        Assert.Equal(OrchestrationStage.Report, result.Stage);
+        Assert.Equal(AgentOrchestrator.BlockedExitCode, result.ExitCode);
+        Assert.DoesNotContain(runner.CommandLines, c => c.StartsWith("git add", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MissingReportFromASingleSpecialist_ContinuesWithTheDefaultDescription()
+    {
+        var (result, _, session) = await RunAsync(report: null, agent: "developer");
 
         Assert.True(result.Succeeded);
-        Assert.Contains("[WARN] El agente no dejó el informe", _error.ToString());
         Assert.DoesNotContain("Informe de ejecución", File.ReadAllText(Path.Combine(session!.RunDirectory, "pr-body.md")));
+    }
+
+    [Theory]
+    [InlineData("status: COMPLETED | BLOCKED\n\n## Summary\nx")]
+    [InlineData("## Summary\nsin estado")]
+    public async Task UnrecognizedStatus_StopsWithExitCode3InsteadOfPublishing(string report)
+    {
+        var (result, runner, _) = await RunAsync(report, createPr: true);
+
+        Assert.Equal(OrchestrationStage.Report, result.Stage);
+        Assert.Equal(AgentOrchestrator.BlockedExitCode, result.ExitCode);
+        Assert.DoesNotContain(runner.Requests, r => r.FileName == "gh");
+    }
+
+    [Fact]
+    public async Task AgentFailsAfterWritingTheReport_LeavesNoReportDirectory()
+    {
+        var (result, _, _) = await RunAsync(CompletedReport, claudeExitCode: 1);
+
+        Assert.Equal(OrchestrationStage.Agent, result.Stage);
+        Assert.False(ReportDirectoryExists);
+    }
+
+    [Fact]
+    public async Task StaleReportFromAnEarlierRun_IsArchivedAndNeverRead()
+    {
+        Directory.CreateDirectory(Path.Combine(Root, RunReport.DirectoryName));
+        File.WriteAllText(Path.Combine(Root, RunReport.RelativePath), "status: COMPLETED\n\n## Summary\nviejo");
+
+        var (result, _, session) = await RunAsync(report: null, agent: "developer");
+
+        Assert.True(result.Succeeded);
+        Assert.DoesNotContain("viejo", File.ReadAllText(Path.Combine(session!.RunDirectory, "pr-body.md")));
+        Assert.True(File.Exists(Path.Combine(session.RunDirectory, "previous-aiharness", "run-report.md")));
+        Assert.False(ReportDirectoryExists);
+    }
+
+    [Fact]
+    public async Task WithoutSession_AReportOnDiskIsIgnoredAndKept()
+    {
+        Directory.CreateDirectory(Path.Combine(Root, RunReport.DirectoryName));
+        File.WriteAllText(Path.Combine(Root, RunReport.RelativePath), "status: BLOCKED\n");
+
+        var (result, runner, _) = await RunAsync(report: null, agent: "developer", withSession: false);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(["-p"], runner.Requests.Single(r => r.FileName == "claude").Arguments);
+        Assert.True(ReportDirectoryExists);
+    }
+
+    [Fact]
+    public async Task VersionedReportDirectory_FailsBeforeRunningTheAgent()
+    {
+        var (result, runner, _) = await RunAsync(CompletedReport,
+            script: r => r.On($"git ls-files -- {RunReport.DirectoryName}", stdout: ".aiharness/run-report.md\n"));
+
+        Assert.Equal(OrchestrationStage.Agent, result.Stage);
+        Assert.Equal(1, result.ExitCode);
+        Assert.DoesNotContain(runner.Requests, r => r.FileName == "claude");
+    }
+
+    [Fact]
+    public async Task ReportWithSecretLikeText_IsKeptOutOfThePullRequest()
+    {
+        var (result, _, session) = await RunAsync(CompletedReport + "token = ghp_abcdefghijklmnopqrstuvwxyz0123\n");
+
+        Assert.True(result.Succeeded);
+        Assert.DoesNotContain("ghp_", File.ReadAllText(Path.Combine(session!.RunDirectory, "pr-body.md")));
+        Assert.Contains("forma de credencial", _error.ToString());
+    }
+
+    [Fact]
+    public async Task ReportClosingKeywordsAndMentions_AreNeutralizedInThePullRequest()
+    {
+        var (_, _, session) = await RunAsync(CompletedReport + "Fixes #12, closes acme/other#3. cc @octocat\n");
+
+        var body = File.ReadAllText(Path.Combine(session!.RunDirectory, "pr-body.md"));
+        Assert.StartsWith("Closes #42", body);
+        Assert.DoesNotContain("Fixes #12", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("acme/other#3", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("@octocat", body, StringComparison.Ordinal);
     }
 
     [Fact]

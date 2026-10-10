@@ -51,10 +51,10 @@ El orquestador (`AgentOrchestrator`) recorre las etapas `Preflight → Bootstrap
   - el prompt es solo la tarea (spec, rama base); las instrucciones del agente y el `CLAUDE.md` del destino los carga Claude Code.
 
   `--execute` y `--orchestrate` siguen enviando el prompt unificado (agente + spec + CLAUDE.md) a `claude -p` con la configuración del repositorio.
-- **Report:** lee `.aiharness/run-report.md` (el informe de `lead`), lo archiva y lo elimina del repositorio (también está en `.git/info/exclude`). `status: BLOCKED` detiene el pipeline con el código **3**: hace falta una decisión humana y la rama queda para retomar.
+- **Report:** lee `.aiharness/run-report.md` (el informe de `lead`), lo archiva y lo elimina del repositorio (también se añade a `info/exclude` y se excluye del `git add`). `status: BLOCKED`, un estado no reconocido o la falta de informe de `lead` detienen el pipeline con el código **3**: hace falta una decisión humana. Para retomar, se vuelve a ejecutar el mismo comando: la rama conserva los cambios sin confirmar.
 - **Commit:** confirma los cambios del agente con el título de la spec (`<tipo>: ... (closes #N)`).
 - **Tests (Quality Gate):** detecta y ejecuta, en este orden, `dotnet test` (`*.sln`, `*.slnx` o `*.csproj` en la raíz), `npm test` (script `test` real en `package.json`) o `make test`.
-- **PullRequest:** sin `--create-pr` solo imprime los comandos `git push` y `gh pr create` para que una persona los ejecute; con `--create-pr` los ejecuta. En `--process-issue`, la descripción incluye el informe de ejecución (criterios de aceptación con evidencia, resultado de cada agente, hallazgos abiertos) y se pasa con `--body-file`.
+- **PullRequest:** sin `--create-pr` solo imprime los comandos `git push` y `gh pr create` para que una persona los ejecute; con `--create-pr` los ejecuta. En `--process-issue`, la descripción incluye el informe de ejecución (criterios de aceptación con evidencia, resultado de cada agente, hallazgos abiertos), saneado (sin texto con forma de credencial, sin palabras de cierre de otros Issues ni menciones) y se pasa con `--body-file`.
 
 ### Trazabilidad
 Cada ejecución de `--process-issue` guarda en `~/.aiharness/runs/<owner>/<repo>/<issue>/<fecha-hora>/`, fuera del repositorio:

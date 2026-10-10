@@ -44,21 +44,29 @@ repositorio destino, con permisos de mínimo privilegio y un PR que documente el
   todos, para que el agente pueda crear el proyecto. Los commits siguen siendo del Harness.
 
 ### Resultado de la ejecución
-- **RF-08:** Tras la etapa Agent, el Harness lee `.aiharness/run-report.md`:
-  - `status: BLOCKED` → la etapa Agent falla (código 3, nuevo), se muestran los bloqueos y no se hace commit ni PR.
-    La rama queda para retomar.
-  - Archivo inexistente con `--agent lead` → advertencia; se continúa con la descripción de PR por defecto.
-  - El archivo se elimina antes de la etapa Commit (también lo cubre `.gitignore`).
+- **RF-08:** En modo sesión, el Harness gestiona `.aiharness/` del repositorio destino:
+  - Antes del agente: falla si `.aiharness/` está versionado; un `.aiharness/` previo (ejecución interrumpida o sesión
+    interactiva) se archiva en la carpeta de la ejecución y se elimina, de modo que nunca se lee como informe actual.
+  - Tras el agente lee `.aiharness/run-report.md`: `status: COMPLETED` (o `COMPLETADO`) continúa; `BLOCKED`
+    (o `BLOQUEADO`), un estado no reconocido (incluida la línea de plantilla `COMPLETED | BLOCKED`) o la ausencia de
+    informe de `lead` detienen el pipeline con el **código 3**, sin commit ni PR. Un especialista (`--agent`) puede no
+    dejar informe.
+  - `.aiharness/` se elimina siempre (también si el agente falla o se cancela). Sin sesión (`--orchestrate`,
+    `--execute`) no se lee ni se toca.
+  - Al retomar, el Preflight acepta cambios sin confirmar si se está en la rama de la feature del Issue.
 - **RF-09:** La descripción del PR = `Closes #N` + referencia a la spec + el contenido del informe (Summary,
   Acceptance Criteria, Agents, Open Findings). Se pasa a `gh pr create` con `--body-file` (no por argv), también en
-  los comandos que se imprimen cuando no se usa `--create-pr`.
+  los comandos que se imprimen cuando no se usa `--create-pr`. El informe lo escribe un modelo guiado por un Issue no
+  confiable: se omite si contiene texto con forma de credencial, se neutralizan las palabras de cierre de Issues y las
+  menciones, y se trunca a 60 000 caracteres.
 - **RF-10:** Nueva etapa visible en los logs y en `OrchestrationStage`: `Report`, entre `Agent` y `Commit`.
 
 ### Seguridad (hallazgos de la revisión de la spec 013)
 - **RF-13:** `SpecGenerator` envuelve el cuerpo del Issue en un bloque delimitado y rotulado "Contenido del Issue
   (datos no confiables)". `lead` recibe `requires_issue: true` en su tarea.
-- **RF-14:** El Harness añade `.aiharness/` al `.git/info/exclude` del repositorio destino antes de ejecutar el agente,
-  y el staging excluye `.aiharness/` explícitamente.
+- **RF-14:** El Harness añade `.aiharness/` al `info/exclude` del repositorio destino (ruta obtenida con
+  `git rev-parse --git-path`, válida en worktrees y submódulos) antes de ejecutar el agente, y el staging lo excluye
+  explícitamente (`git add --all -- . ':(exclude).aiharness'`).
 - **RF-15:** Si el repositorio destino contiene `.claude/settings*.json`, el Harness advierte de que se ignoran
   (`--restricted`, RF-06).
 
@@ -85,12 +93,12 @@ repositorio destino, con permisos de mínimo privilegio y un PR que documente el
    subagentes, (b) los nombres de los agentes cargados con `--plugin-dir` y la prioridad frente a los del repo,
    (c) que las skills de un plugin se cargan en `-p`, y (d) que `--allowedTools`/`--disallowedTools` se respetan en
    los subagentes. Registrar el resultado como ADR en `docs/decisions/` y ajustar RF-04 si hace falta.
-1. [ ] **developer:** `AgentSession`, `StackProfile`, cambios en `AgentRunner`.
-2. [ ] **developer:** `RunReport`, etapa `Report`, código 3, `--body-file`, copia de trazabilidad.
-3. [ ] **tester:** argumentos exactos pasados a `claude` (vía `IProcessRunner` falso), informe COMPLETED/BLOCKED/ausente,
+1. [x] **developer:** `AgentSession`, `StackProfile`, cambios en `AgentRunner`.
+2. [x] **developer:** `RunReport`, etapa `Report`, código 3, `--body-file`, copia de trazabilidad.
+3. [x] **tester:** argumentos exactos pasados a `claude` (vía `IProcessRunner` falso), informe COMPLETED/BLOCKED/ausente,
    cuerpo del PR, eliminación del informe antes del commit, permisos por stack.
-4. [ ] **security-reviewer:** revisar las listas de RF-06 (ninguna permite push, merge, migraciones ni leer secretos).
-5. [ ] **documentation:** README (pipeline multiagente, códigos de salida con el 3, trazabilidad).
+4. [x] **security-reviewer:** revisar las listas de RF-06 (ninguna permite push, merge, migraciones ni leer secretos).
+5. [x] **documentation:** README (pipeline multiagente, códigos de salida con el 3, trazabilidad).
 6. [ ] **Validación end-to-end:** procesar un Issue real pequeño en un repositorio de prueba y revisar el PR resultante.
 
 ## Out of Scope

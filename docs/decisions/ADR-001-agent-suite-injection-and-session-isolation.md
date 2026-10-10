@@ -24,6 +24,8 @@ Se verificó con Claude Code 2.1.283 (Tarea 0 de la spec 014), en un repositorio
 | `--disallowedTools` dentro de un subagente | Se respeta |
 | `.claude/settings.json` del destino con `allow: ["Bash(*)"]`, sin `--restricted` | Ignorado solo porque el directorio no fue marcado como confiable; se aplicaría si alguien lo abre de forma interactiva y acepta el diálogo de confianza |
 | `--restricted` | Ignora los archivos de configuración de usuario, proyecto y local; `--settings` sigue aplicando (`allow` probado: permitido vs. denegado); limita las herramientas de archivos al directorio de trabajo; bloquea escrituras en `.git/`; el `CLAUDE.md` del destino se sigue cargando |
+| Agentes, skills y comandos propios del destino (`.claude/agents`, `.claude/skills`) bajo `--restricted` | **No se cargan**: un agente plantado no aparece y una skill con el mismo nombre que una de la suite no la sustituye (sin `--restricted`, sí: la del destino gana) |
+| Reglas `Edit(/x)` en un archivo pasado con `--settings` | `/x` se resuelve respecto a la carpeta de ese archivo, no del repositorio; `./x` se resuelve respecto al directorio de trabajo |
 | `--allowedTools`/`--disallowedTools` | Aceptan varios valores y consumen el argumento siguiente: el prompt debe ir por STDIN (como ya hace `AgentRunner`) |
 | Comandos de solo lectura (`git log`, `echo`, `uname`) y de archivos en el directorio de trabajo con `acceptEdits` (`touch`) | Claude Code los permite sin regla explícita |
 
@@ -53,8 +55,11 @@ claude -p --restricted --strict-mcp-config
   resuelve con el prefijo del plugin.
 - **Permisos → `--restricted` + `--settings`**, generado en cada ejecución por el Harness: `allow` con las
   herramientas de edición, `git status/diff/log/show` y los comandos de build/test del stack detectado
-  (`StackProfile`); `deny` con las reglas de `.claude/settings.json` del Harness (push, merge, `--output`,
-  no-index implícito, secretos, `.git/`). Las reglas `ask` no se copian: en `-p` equivalen a denegar.
+  (`StackProfile`); `deny` con las reglas `deny` **y** `ask` de `.claude/settings.json` del Harness (en `-p` nadie
+  puede responder un *ask*) más `git commit/push`, `gh`, aplicar migraciones e instalaciones de paquetes fuera del
+  repositorio o desde URLs. Las rutas `/x` de esas reglas se reescriben a `./x` para que apunten al repositorio destino.
+  `StackProfile` no permite `npx` (descarga y ejecuta paquetes no instalados) ni plantillas arbitrarias de
+  `dotnet new`/`npm init`; los scripts del repositorio se ejecutan con `npm run`.
 - `--tools` lista las herramientas integradas porque `--restricted` elimina `Bash` si no se nombra.
 - Los archivos generados (`settings.json`, `agents.json`, `plugin/`) van en
   `~/.aiharness/runs/<owner>/<repo>/<issue>/<timestamp>/`, fuera del repositorio destino; esa misma carpeta guarda
@@ -76,6 +81,9 @@ claude -p --restricted --strict-mcp-config
   - `--restricted` también ignora la configuración de usuario (`~/.claude/settings.json`) en estas ejecuciones.
   - Los comandos que Claude Code considera de solo lectura se ejecutan sin regla explícita; las reglas `deny` siguen
     aplicando sobre ellos.
+  - `npm install <paquete>` y `dotnet add package` siguen permitidos (el agente necesita dependencias) y ejecutan
+    scripts de instalación del registro; el `CLAUDE.md` del destino se sigue cargando y puede contener instrucciones.
+    Ambos entran en el riesgo aceptado hasta la spec 015.
   - Dependencia de opciones de la CLI (`--restricted`, `--agents`): un cambio de comportamiento en futuras versiones
     rompería el aislamiento. Mitigación: tests de los argumentos exactos y repetir la Tarea 0 al actualizar Claude Code.
   - El código que escribe un agente y ejecuta `dotnet test`/`npm test` sigue pudiendo usar la red y las credenciales

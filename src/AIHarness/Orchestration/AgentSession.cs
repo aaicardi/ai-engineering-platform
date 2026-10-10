@@ -35,6 +35,10 @@ public sealed partial class AgentSession
         "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh:*)", "Bash(rm -rf:*)",
         "Bash(dotnet ef database update:*)", "Bash(prisma migrate deploy:*)", "Bash(npx prisma migrate deploy:*)",
         "Bash(knex migrate:*)", "Bash(npx knex migrate:*)",
+        // Package installs that reach outside the repository or fetch arbitrary code (SEC-1 of the spec 014 review).
+        "Bash(npm install -g:*)", "Bash(npm install --global:*)", "Bash(npm install --prefix:*)", "Bash(npm install *--prefix*)",
+        "Bash(npm install *://*)", "Bash(npm install *github:*)", "Bash(npm install *git+*)",
+        "Bash(dotnet new install:*)", "Bash(dotnet new uninstall:*)", "Bash(dotnet add * --source*)",
     ];
 
     private AgentSession(string agentName, string runDirectory, StackProfile stack, IReadOnlyList<string> warnings)
@@ -93,7 +97,7 @@ public sealed partial class AgentSession
 
         Directory.CreateDirectory(runDirectory);
         var stack = StackProfile.Detect(targetRoot);
-        var session = new AgentSession(agentName, runDirectory, stack, CollectWarnings(targetRoot, agents.Keys));
+        var session = new AgentSession(agentName, runDirectory, stack, CollectWarnings(targetRoot, Path.Combine(claudeDir, "agents"), agents.Keys));
 
         File.WriteAllText(session.AgentsPath, AgentsJson(agents));
         File.WriteAllText(session.SettingsPath, SettingsJson(Path.Combine(claudeDir, "settings.json"), stack));
@@ -117,17 +121,22 @@ public sealed partial class AgentSession
         return agents;
     }
 
-    private static List<string> CollectWarnings(string targetRoot, IEnumerable<string> suiteAgents)
+    private static List<string> CollectWarnings(string targetRoot, string suiteAgentsDir, IEnumerable<string> suiteAgents)
     {
         var warnings = new List<string>();
         var targetAgentsDir = Path.Combine(targetRoot, ".claude", "agents");
-        var overridden = suiteAgents.Where(a => File.Exists(Path.Combine(targetAgentsDir, a + ".md"))).ToList();
+        // A greenfield bootstrap copies the suite into the target: only customized copies are worth a warning.
+        var overridden = suiteAgents
+            .Where(a => File.Exists(Path.Combine(targetAgentsDir, a + ".md"))
+                        && File.ReadAllText(Path.Combine(targetAgentsDir, a + ".md")) != File.ReadAllText(Path.Combine(suiteAgentsDir, a + ".md")))
+            .ToList();
         if (overridden.Count > 0)
             warnings.Add($"El repositorio destino define los agentes {string.Join(", ", overridden)}; se usa la versión del Harness.");
 
         var targetClaudeDir = Path.Combine(targetRoot, ".claude");
         if (Directory.Exists(targetClaudeDir) && Directory.EnumerateFiles(targetClaudeDir, "settings*.json").Any())
             warnings.Add("Se ignora la configuración de Claude Code del repositorio destino (.claude/settings*.json).");
+        // --restricted does not load the target's own agents, skills or commands either (verified, ADR-001).
         return warnings;
     }
 

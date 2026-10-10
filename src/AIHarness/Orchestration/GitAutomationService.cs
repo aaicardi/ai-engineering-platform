@@ -49,9 +49,28 @@ public sealed class GitAutomationService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
 
-        var exitCode = await RelayAsync(gitExecutable, ["add", "--all"], cancellationToken);
+        var exitCode = await RelayAsync(gitExecutable, [.. AddAllArguments], cancellationToken);
         return exitCode != 0 ? exitCode : await RelayAsync(gitExecutable, ["commit", "-m", message], cancellationToken);
     }
+
+    /// <summary>
+    /// Stages everything except AI Harness's own run directory (<c>.aiharness/</c>), which must never be committed even
+    /// if <c>info/exclude</c> could not be written.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AddAllArguments = ["add", "--all", "--", ".", ":(exclude).aiharness"];
+
+    /// <summary>
+    /// Path of <paramref name="name"/> inside the git directory (<c>git rev-parse --git-path</c>), relative to the working
+    /// directory; also correct for worktrees and submodules, where <c>.git</c> is a file.
+    /// </summary>
+    /// <exception cref="GitAutomationException">git failed.</exception>
+    public Task<string> GetGitPathAsync(string name, CancellationToken cancellationToken = default) =>
+        CaptureGitAsync(["rev-parse", "--git-path", name], cancellationToken);
+
+    /// <summary>Tracked files under <paramref name="path"/>, one per line; empty when none.</summary>
+    /// <exception cref="GitAutomationException">git failed.</exception>
+    public Task<string> ListTrackedFilesAsync(string path, CancellationToken cancellationToken = default) =>
+        CaptureGitAsync(["ls-files", "--", path], cancellationToken);
 
     /// <summary><c>false</c> on a repository without commits yet (unborn HEAD, e.g. a freshly created GitHub repository).</summary>
     public async Task<bool> HasCommitsAsync(CancellationToken cancellationToken = default)
