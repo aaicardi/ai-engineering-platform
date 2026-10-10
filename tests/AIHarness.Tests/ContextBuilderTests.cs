@@ -35,6 +35,30 @@ public sealed class ContextBuilderTests : IDisposable
     }
 
     [Fact]
+    public void Build_AgentWithFrontmatter_InsertsOnlyTheBody()
+    {
+        File.WriteAllText(Path.Combine(_root, ".claude", "agents", "developer.md"),
+            "---\nname: developer\ndescription: Implementa\ntools: Read, Edit\nmodel: sonnet\n---\n# Agent: Developer\nregla-agente");
+
+        var prompt = Builder.Build("developer", "003-demo.md").Prompt;
+
+        Assert.Contains("# Agent: Developer\nregla-agente", prompt.Replace("\r\n", "\n"));
+        Assert.DoesNotContain("tools: Read, Edit", prompt);
+        Assert.DoesNotContain("model: sonnet", prompt);
+    }
+
+    [Fact]
+    public void Build_SymlinkedClaudeMd_IsRejected()
+    {
+        var target = Path.Combine(_root, "outside.txt");
+        File.WriteAllText(target, "secreto");
+        File.Delete(Path.Combine(_root, "CLAUDE.md"));
+        File.CreateSymbolicLink(Path.Combine(_root, "CLAUDE.md"), target);
+
+        Assert.Throws<InvalidDataException>(() => Builder.Build("developer", "003-demo.md"));
+    }
+
+    [Fact]
     public void Build_UnknownAgent_ThrowsAgentNotFoundWithAvailableAgents()
     {
         var ex = Assert.Throws<AgentNotFoundException>(() => Builder.Build("ghost", "003-demo.md"));

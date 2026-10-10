@@ -1,12 +1,19 @@
+using AIHarness.Prompting;
+
 namespace AIHarness.Inspection;
 
 public sealed record ClaudeMdAudit(bool Exists, string Path, int LineCount, IReadOnlyList<string> Sections);
 
-public sealed record AgentEntry(string Name, bool Present);
+/// <param name="Present">The definition file exists.</param>
+/// <param name="Problems">Why the file is not a valid Claude Code subagent (see <see cref="AgentDefinition.Validate"/>); empty when valid.</param>
+public sealed record AgentEntry(string Name, bool Present, IReadOnlyList<string> Problems)
+{
+    public bool IsValid => Present && Problems.Count == 0;
+}
 
 public sealed record AgentsAudit(bool DirectoryExists, IReadOnlyList<AgentEntry> Agents, IReadOnlyList<string> Unexpected)
 {
-    public bool AllPresent => DirectoryExists && Agents.All(a => a.Present);
+    public bool AllPresent => DirectoryExists && Agents.All(a => a.IsValid);
 }
 
 public sealed record SpecEntry(string FileName, string Title);
@@ -27,7 +34,7 @@ public sealed class RepositoryInspector(string rootPath)
 {
     public static readonly IReadOnlyList<string> ExpectedAgents =
     [
-        "architect", "developer", "tester", "code-reviewer",
+        "lead", "architect", "developer", "tester", "code-reviewer",
         "security-reviewer", "devops", "documentation",
     ];
 
@@ -52,16 +59,34 @@ public sealed class RepositoryInspector(string rootPath)
     {
         var dir = Path.Combine(rootPath, ".claude", "agents");
         if (!Directory.Exists(dir))
-            return new AgentsAudit(false, ExpectedAgents.Select(a => new AgentEntry(a, false)).ToList(), []);
+            return new AgentsAudit(false, ExpectedAgents.Select(Missing).ToList(), []);
 
         var found = Directory.GetFiles(dir, "*.md")
             .Select(Path.GetFileNameWithoutExtension)
             .OfType<string>()
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(StringComparer.Ordinal);
 
-        var agents = ExpectedAgents.Select(a => new AgentEntry(a, found.Contains(a))).ToList();
-        var unexpected = found.Except(ExpectedAgents, StringComparer.OrdinalIgnoreCase).Order().ToList();
+        var agents = ExpectedAgents
+            .Select(a => found.Contains(a)
+                ? new AgentEntry(a, true, ValidateAgent(Path.Combine(dir, a + ".md"), a))
+                : Missing(a))
+            .ToList();
+        var unexpected = found.Except(ExpectedAgents, StringComparer.Ordinal).Order().ToList();
         return new AgentsAudit(true, agents, unexpected);
+
+        static AgentEntry Missing(string name) => new(name, false, ["no existe"]);
+    }
+
+    private static IReadOnlyList<string> ValidateAgent(string path, string name)
+    {
+        try
+        {
+            return AgentDefinition.Parse(SafeFile.ReadText(path)).Validate(name);
+        }
+        catch (InvalidDataException ex)
+        {
+            return [ex.Message];
+        }
     }
 
     private SpecsAudit InspectSpecs()

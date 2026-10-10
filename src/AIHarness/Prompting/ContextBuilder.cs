@@ -38,9 +38,10 @@ public sealed class ContextBuilder(string rootPath, string? fallbackAgentsDirect
         var prompt = new StringBuilder()
             .AppendLine($"# Prompt unificado — Agente: {agentName} | Spec: {specFileName}")
             .AppendLine()
-            .AppendSection("1. Gobernanza (CLAUDE.md)", File.ReadAllText(claudeMdPath))
-            .AppendSection($"2. Agente ({agentName})", File.ReadAllText(agentPath))
-            .AppendSection($"3. Especificación ({specFileName})", File.ReadAllText(specPath))
+            .AppendSection("1. Gobernanza (CLAUDE.md)", SafeFile.ReadText(claudeMdPath))
+            // Only the instructions: the frontmatter is Claude Code subagent metadata, not part of the prompt.
+            .AppendSection($"2. Agente ({agentName})", AgentDefinition.Parse(SafeFile.ReadText(agentPath)).Body)
+            .AppendSection($"3. Especificación ({specFileName})", SafeFile.ReadText(specPath))
             .ToString();
 
         return new PromptContext(agentName, specFileName, prompt);
