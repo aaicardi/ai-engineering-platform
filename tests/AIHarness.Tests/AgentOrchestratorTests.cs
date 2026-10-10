@@ -101,7 +101,21 @@ public sealed class AgentOrchestratorTests : IDisposable
 
         Assert.Equal(OrchestrationStage.Preflight, result.Stage);
         Assert.Equal(1, result.ExitCode);
-        Assert.Equal(["git status --porcelain --untracked-files=no"], runner.CommandLines);
+        Assert.Equal(["git status --porcelain --untracked-files=no", "git rev-parse --abbrev-ref HEAD"], runner.CommandLines);
+    }
+
+    [Fact]
+    public async Task RunAsync_DirtyWorkingTreeOnTheFeatureBranch_ResumesThePreviousRun()
+    {
+        var runner = HappyPath()
+            .On("git status --porcelain --untracked-files=no", stdout: " M src/Program.cs\n")
+            .On("git rev-parse --abbrev-ref HEAD", stdout: $"{Branch}\n");
+
+        var result = await RunAsync(runner);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains($"Se retoma la rama {Branch}", _error.ToString());
+        Assert.DoesNotContain(runner.CommandLines, c => c.StartsWith("git checkout", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -193,7 +207,7 @@ public sealed class AgentOrchestratorTests : IDisposable
 
         Assert.True(result.Succeeded);
         var commands = runner.CommandLines.ToList();
-        var add = commands.IndexOf("git add --all");
+        var add = commands.IndexOf("git add --all -- . :(exclude).aiharness");
         Assert.True(add > commands.IndexOf("claude -p"));
         var commit = runner.Requests[add + 1];
         Assert.Equal(["commit", "-m", "feat(orchestration): Add Git Automation (closes #27)"], commit.Arguments);
@@ -215,13 +229,13 @@ public sealed class AgentOrchestratorTests : IDisposable
     {
         var runner = HappyPath()
             .On("git status --porcelain", stdout: "?? src/New.cs\n")
-            .On("git add --all", exitCode: 128);
+            .On("git add --all -- . :(exclude).aiharness", exitCode: 128);
 
         var result = await RunAsync(runner, new OrchestrationOptions(CreatePullRequest: true));
 
         Assert.Equal(OrchestrationStage.Commit, result.Stage);
         Assert.Equal(128, result.ExitCode);
-        Assert.Equal("git add --all", runner.CommandLines.Last());
+        Assert.Equal("git add --all -- . :(exclude).aiharness", runner.CommandLines.Last());
     }
 
     [Fact]
@@ -334,7 +348,7 @@ public sealed class AgentOrchestratorTests : IDisposable
         Assert.True(File.Exists(IssueSpecPath));
         Assert.Equal($"git checkout -b {IssueBranch}", runner.CommandLines.ElementAt(launchesBeforeSpec - 1));
         Assert.Equal(
-            ["claude -p", "git status --porcelain", "git add --all"],
+            ["claude -p", "git status --porcelain", "git add --all -- . :(exclude).aiharness"],
             runner.CommandLines.Skip(launchesBeforeSpec).Take(3));
         Assert.Contains(runner.Requests, r => r.Arguments.SequenceEqual(
             ["commit", "-m", "feat(orchestration): Add unified --process-issue flag (closes #31)"]));
@@ -488,7 +502,7 @@ public sealed class AgentOrchestratorTests : IDisposable
         var commands = runner.CommandLines.ToList();
         var symbolicRef = commands.IndexOf("git symbolic-ref HEAD refs/heads/main");
         Assert.True(symbolicRef > 0);
-        Assert.Equal("git add --all", commands[symbolicRef + 1]);
+        Assert.Equal("git add --all -- . :(exclude).aiharness", commands[symbolicRef + 1]);
         Assert.Equal(["commit", "-m", AgentOrchestrator.BootstrapCommitMessage], runner.Requests[symbolicRef + 2].Arguments);
         Assert.True(commands.IndexOf($"git checkout -b {IssueBranch}") > symbolicRef + 2);
         // The remote has no base branch yet: it is published before the feature branch so the PR has a target.

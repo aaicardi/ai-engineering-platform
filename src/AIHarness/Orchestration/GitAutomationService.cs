@@ -49,9 +49,28 @@ public sealed class GitAutomationService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
 
-        var exitCode = await RelayAsync(gitExecutable, ["add", "--all"], cancellationToken);
+        var exitCode = await RelayAsync(gitExecutable, [.. AddAllArguments], cancellationToken);
         return exitCode != 0 ? exitCode : await RelayAsync(gitExecutable, ["commit", "-m", message], cancellationToken);
     }
+
+    /// <summary>
+    /// Stages everything except AI Harness's own run directory (<c>.aiharness/</c>), which must never be committed even
+    /// if <c>info/exclude</c> could not be written.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AddAllArguments = ["add", "--all", "--", ".", ":(exclude).aiharness"];
+
+    /// <summary>
+    /// Path of <paramref name="name"/> inside the git directory (<c>git rev-parse --git-path</c>), relative to the working
+    /// directory; also correct for worktrees and submodules, where <c>.git</c> is a file.
+    /// </summary>
+    /// <exception cref="GitAutomationException">git failed.</exception>
+    public Task<string> GetGitPathAsync(string name, CancellationToken cancellationToken = default) =>
+        CaptureGitAsync(["rev-parse", "--git-path", name], cancellationToken);
+
+    /// <summary>Tracked files under <paramref name="path"/>, one per line; empty when none.</summary>
+    /// <exception cref="GitAutomationException">git failed.</exception>
+    public Task<string> ListTrackedFilesAsync(string path, CancellationToken cancellationToken = default) =>
+        CaptureGitAsync(["ls-files", "--", path], cancellationToken);
 
     /// <summary><c>false</c> on a repository without commits yet (unborn HEAD, e.g. a freshly created GitHub repository).</summary>
     public async Task<bool> HasCommitsAsync(CancellationToken cancellationToken = default)
@@ -126,7 +145,8 @@ public sealed class GitAutomationService(
     /// <summary>Command that opens the Pull Request for <paramref name="request"/>.</summary>
     public static string[] PullRequestArguments(PullRequestRequest request) =>
     [
-        "pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title, "--body", request.Body,
+        "pr", "create", "--base", request.BaseBranch, "--head", request.HeadBranch, "--title", request.Title,
+        .. (request.BodyFile is null ? new[] { "--body", request.Body } : new[] { "--body-file", request.BodyFile }),
         .. (request.Repository is null ? Array.Empty<string>() : new[] { "--repo", request.Repository.ToString() }),
     ];
 
@@ -180,7 +200,9 @@ public sealed class GitAutomationService(
 
 /// <summary>Parameters of <c>gh pr create</c>.</summary>
 /// <param name="Repository">Repository the PR is opened on; <c>null</c> lets gh infer it from the working directory.</param>
-public sealed record PullRequestRequest(string BaseBranch, string HeadBranch, string Title, string Body, GitHubRepository? Repository = null);
+/// <param name="BodyFile">File holding <paramref name="Body"/>; when set, gh reads the description from it (<c>--body-file</c>).</param>
+public sealed record PullRequestRequest(
+    string BaseBranch, string HeadBranch, string Title, string Body, GitHubRepository? Repository = null, string? BodyFile = null);
 
 public sealed class GitAutomationException(string command, int exitCode, string detail)
     : Exception($"'{command}' falló con código {exitCode}{(detail.Length == 0 ? "." : $": {detail}")}")

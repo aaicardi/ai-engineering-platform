@@ -48,17 +48,17 @@ public sealed class GitAutomationServiceTests
         var exitCode = await Service(runner).CommitAllAsync("feat(x): it's done (closes #1)");
 
         Assert.Equal(0, exitCode);
-        Assert.Equal(["add", "--all"], runner.Requests[0].Arguments);
+        Assert.Equal(["add", "--all", "--", ".", ":(exclude).aiharness"], runner.Requests[0].Arguments);
         Assert.Equal(["commit", "-m", "feat(x): it's done (closes #1)"], runner.Requests[1].Arguments);
     }
 
     [Fact]
     public async Task CommitAllAsync_AddFails_DoesNotCommit()
     {
-        var runner = new ScriptedProcessRunner().On("git add --all", exitCode: 128);
+        var runner = new ScriptedProcessRunner().On("git add --all -- . :(exclude).aiharness", exitCode: 128);
 
         Assert.Equal(128, await Service(runner).CommitAllAsync("feat: x"));
-        Assert.Equal(["git add --all"], runner.CommandLines);
+        Assert.Equal(["git add --all -- . :(exclude).aiharness"], runner.CommandLines);
     }
 
     [Theory]
@@ -138,6 +138,17 @@ public sealed class GitAutomationServiceTests
         var ex = await Assert.ThrowsAsync<GitAutomationException>(() => Service(runner).RemoteBranchExistsAsync("main"));
 
         Assert.Equal(128, ex.ExitCode);
+    }
+
+    [Fact]
+    public void PullRequestArguments_BodyFile_ReplacesTheInlineBody()
+    {
+        var arguments = GitAutomationService.PullRequestArguments(
+            new PullRequestRequest("main", "feature/1-x", "feat: x", "Closes #1", BodyFile: "/runs/1/pr-body.md"));
+
+        Assert.Equal(
+            ["pr", "create", "--base", "main", "--head", "feature/1-x", "--title", "feat: x", "--body-file", "/runs/1/pr-body.md"],
+            arguments);
     }
 
     [Fact]

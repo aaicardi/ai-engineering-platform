@@ -37,18 +37,28 @@ El repositorio cumple dos funciones:
 
 ### Pipeline
 ```
-Issue de GitHub → spec OpenSpec → rama feature/<issue>-<slug> → agente (claude -p) → commit → Quality Gate → Pull Request
+Issue de GitHub → spec OpenSpec → rama feature/<issue>-<slug> → suite de agentes (lead) → informe → commit → Quality Gate → Pull Request
 ```
 
-El orquestador (`AgentOrchestrator`) recorre las etapas `Preflight → Bootstrap → Branch → Spec → Agent → Commit → Tests → PullRequest` y se detiene en la primera que falla, indicando la etapa en el error.
+El orquestador (`AgentOrchestrator`) recorre las etapas `Preflight → Bootstrap → Branch → Spec → Agent → Report → Commit → Tests → PullRequest` y se detiene en la primera que falla, indicando la etapa en el error.
 
 - **Preflight:** exige un árbol de trabajo sin cambios en archivos versionados.
 - **Branch:** crea o reutiliza `feature/<issue>-<slug>`, de modo que una ejecución interrumpida puede reanudarse.
-- **Spec:** genera `openspec/specs/NNN-<slug>.md` desde el Issue o reutiliza la existente (nunca sobrescribe).
-- **Agent:** envía el prompt unificado (definición del agente + spec + CLAUDE.md) por STDIN a `claude -p`. No se omiten permisos: aplica la configuración de Claude Code del repositorio.
+- **Spec:** genera `openspec/specs/NNN-<slug>.md` desde el Issue o reutiliza la existente (nunca sobrescribe). Los criterios de aceptación usan el comando de tests del repositorio destino, y el cuerpo del Issue se marca como contenido no confiable.
+- **Agent:** en `--process-issue`, ejecuta la [suite de agentes](#modelo-de-agentes) coordinada por `lead` en una sesión `claude -p` aislada ([ADR-001](docs/decisions/ADR-001-agent-suite-injection-and-session-isolation.md)), sin modificar el repositorio destino:
+  - agentes con `--agents` y skills con un plugin generado (`--plugin-dir`): la suite del Harness gana sobre los agentes del destino;
+  - `--restricted` y un `--settings` generado: se ignora la configuración de Claude Code del destino; se permiten edición, `git` de solo lectura y los comandos de build/test del stack detectado (`StackProfile`); se deniegan `git commit/push`, `gh`, aplicar migraciones y las reglas `deny`/`ask` de este repositorio;
+  - el prompt es solo la tarea (spec, rama base); las instrucciones del agente y el `CLAUDE.md` del destino los carga Claude Code.
+
+  `--execute` y `--orchestrate` siguen enviando el prompt unificado (agente + spec + CLAUDE.md) a `claude -p` con la configuración del repositorio.
+- **Report:** lee `.aiharness/run-report.md` (el informe de `lead`), lo archiva y lo elimina del repositorio (también se añade a `info/exclude` y se excluye del `git add`). `status: BLOCKED`, un estado no reconocido o la falta de informe de `lead` detienen el pipeline con el código **3**: hace falta una decisión humana. Para retomar, se vuelve a ejecutar el mismo comando: la rama conserva los cambios sin confirmar.
 - **Commit:** confirma los cambios del agente con el título de la spec (`<tipo>: ... (closes #N)`).
 - **Tests (Quality Gate):** detecta y ejecuta, en este orden, `dotnet test` (`*.sln`, `*.slnx` o `*.csproj` en la raíz), `npm test` (script `test` real en `package.json`) o `make test`.
-- **PullRequest:** sin `--create-pr` solo imprime los comandos `git push` y `gh pr create` para que una persona los ejecute; con `--create-pr` los ejecuta.
+- **PullRequest:** sin `--create-pr` solo imprime los comandos `git push` y `gh pr create` para que una persona los ejecute; con `--create-pr` los ejecuta. En `--process-issue`, la descripción incluye el informe de ejecución (criterios de aceptación con evidencia, resultado de cada agente, hallazgos abiertos), saneado (sin texto con forma de credencial, sin palabras de cierre de otros Issues ni menciones) y se pasa con `--body-file`.
+
+### Trazabilidad
+Cada ejecución de `--process-issue` guarda en `~/.aiharness/runs/<owner>/<repo>/<issue>/<fecha-hora>/`, fuera del repositorio:
+`task.md` (prompt enviado), `settings.json`, `agents.json`, `plugin/`, `run-report.md` y `pr-body.md`.
 
 ### Requisitos
 - .NET SDK 10
@@ -78,7 +88,7 @@ alias aiharness='dotnet run --project src/AIHarness --'
 | `aiharness --agent <nombre> --spec <archivo> --orchestrate [--base <rama>] [--create-pr]` | Ciclo Git completo para una spec existente |
 | `aiharness --issue <n> [--repo <owner/name>]` | Muestra un Issue de GitHub (repo por defecto: remote `origin`) |
 | `aiharness --issue <n> --generate-spec` | Además genera la spec en `openspec/specs/` |
-| `aiharness --process-issue <n> [--agent <nombre>] [--repo <owner/name>] [--target-dir <dir>] [--base <rama>] [--create-pr]` | Pipeline completo desde el Issue (agente `developer` por defecto) |
+| `aiharness --process-issue <n> [--agent <nombre>] [--repo <owner/name>] [--target-dir <dir>] [--base <rama>] [--create-pr]` | Pipeline completo desde el Issue (suite de agentes coordinada por `lead`; `--agent` ejecuta un solo agente de la suite) |
 | `aiharness --version` | Versión de AI Harness y del runtime .NET |
 | `aiharness --status` | Versión, runtime, sistema operativo y uptime |
 
@@ -101,6 +111,7 @@ Las definiciones de agentes siempre se toman de este repositorio. Si el reposito
 | `0` | Éxito |
 | `1` | Fallo de la operación (auditoría, Git, API de GitHub, agente, Quality Gate...) |
 | `2` | Uso incorrecto (argumento inválido o combinación no permitida) |
+| `3` | El agente terminó con `status: BLOCKED`: necesita una decisión humana (ver el informe) |
 | `127` | Ejecutable no encontrado (`claude`, `git`, `gh`...) |
 | `130` | Cancelado por el usuario (Ctrl+C) |
 
@@ -134,7 +145,8 @@ Si la spec no es implementable o se necesita una acción que requiere aprobació
 `status: BLOCKED` y las preguntas a resolver.
 
 ### Uso
-- **Flujo completo:** `claude --agent lead` y pedir, por ejemplo, *"implementa openspec/specs/013-....md"*.
+- **Desde un Issue:** `aiharness --process-issue <n>` ejecuta este flujo de forma no interactiva (ver [AI Harness](#ai-harness)).
+- **Flujo completo interactivo:** `claude --agent lead` y pedir, por ejemplo, *"implementa openspec/specs/013-....md"*.
   `lead` debe ser el agente **principal** de la sesión: un subagente no puede delegar en otros subagentes.
 - **Un especialista:** desde cualquier sesión, *"usa el agente code-reviewer para revisar los cambios respecto a main"*.
 
@@ -194,4 +206,4 @@ Toda funcionalidad nueva debe contar con su especificación correspondiente en `
 | 011 | Uptime en `--status` |
 | 012 | Workspaces multi-repositorio y bootstrap greenfield |
 | 013 | Suite de subagentes nativos y skills de stack |
-| 014 | Pipeline multiagente en `--process-issue` (pendiente) |
+| 014 | Pipeline multiagente en `--process-issue` |
