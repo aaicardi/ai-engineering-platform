@@ -178,12 +178,12 @@ else
 }
 Console.WriteLine();
 
-var presentCount = report.Agents.Agents.Count(a => a.Present);
-Console.WriteLine($"[2] Agentes (.claude/agents) — {presentCount}/{RepositoryInspector.ExpectedAgents.Count}");
+var validCount = report.Agents.Agents.Count(a => a.IsValid);
+Console.WriteLine($"[2] Agentes (.claude/agents) — {validCount}/{RepositoryInspector.ExpectedAgents.Count}");
 if (!report.Agents.DirectoryExists)
     Console.WriteLine("  FAIL Directorio .claude/agents no encontrado");
 foreach (var agent in report.Agents.Agents)
-    Console.WriteLine($"  {(agent.Present ? "OK  " : "FAIL")} {agent.Name}");
+    Console.WriteLine(agent.IsValid ? $"  OK   {agent.Name}" : $"  FAIL {agent.Name} — {string.Join("; ", agent.Problems)}");
 foreach (var extra in report.Agents.Unexpected)
     Console.WriteLine($"  INFO {extra} (no esperado)");
 Console.WriteLine();
