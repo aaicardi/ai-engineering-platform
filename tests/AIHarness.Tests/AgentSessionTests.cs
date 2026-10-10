@@ -123,6 +123,17 @@ public sealed class AgentSessionTests : IDisposable
         Assert.DoesNotContain(deny, r => r.Contains("(/.", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Rules_NeverMixWildcardsWithTheTrailingPrefixSyntax()
+    {
+        // Claude Code reads `Bash(x *y:*)` as the literal prefix `x *y`: the rule would never match.
+        File.WriteAllText(Path.Combine(_suite.Target, "package.json"), "{}");
+        var settings = Json(_suite.Prepare().SettingsPath);
+
+        var rules = Rules(settings, "allow").Concat(Rules(settings, "deny")).Where(r => r.StartsWith("Bash(", StringComparison.Ordinal));
+        Assert.All(rules, r => Assert.False(r.EndsWith(":*)", StringComparison.Ordinal) && r[..^3].Contains('*'), r));
+    }
+
     [Theory]
     [InlineData("Edit(/.claude/**)", "Edit(./.claude/**)")]
     [InlineData("Read(//abs/path)", "Read(//abs/path)")]

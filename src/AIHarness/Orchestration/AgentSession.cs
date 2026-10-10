@@ -37,7 +37,7 @@ public sealed partial class AgentSession
         "Bash(knex migrate:*)", "Bash(npx knex migrate:*)",
         // Package installs that reach outside the repository or fetch arbitrary code (SEC-1 of the spec 014 review).
         "Bash(npm install -g:*)", "Bash(npm install --global:*)", "Bash(npm install --prefix:*)", "Bash(npm install *--prefix*)",
-        "Bash(npm install *://*)", "Bash(npm install *github:*)", "Bash(npm install *git+*)",
+        "Bash(npm install *://*)", "Bash(npm install *github*)", "Bash(npm install *git+*)",
         "Bash(dotnet new install:*)", "Bash(dotnet new uninstall:*)", "Bash(dotnet add * --source*)",
     ];
 
