@@ -131,32 +131,209 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
                 sb.AppendLine(line.Length == 0 ? ">" : $"> {line}");
         }
 
+        // Comments are stripped only for RF/AC extraction; the quoted body above stays verbatim.
+        var parsedBody = HtmlCommentRegex().Replace(body, "");
+
         sb.AppendLine()
           .AppendLine("## Functional Requirements");
-        var requirements = ExtractRequirements(body);
+        var requirements = ExtractRequirements(parsedBody);
         if (requirements.Count == 0)
             sb.AppendLine("- **RF-01:** _Pendiente de definir por el agente architect._");
         for (var i = 0; i < requirements.Count; i++)
             sb.AppendLine($"- **RF-{i + 1:D2}:** {requirements[i]}");
 
-        return sb.AppendLine()
-          .AppendLine("## Acceptance Criteria")
-          .AppendLine(string.IsNullOrWhiteSpace(testCommand)
-              ? "- [ ] El proyecto compila y su suite de tests pasa."
-              : $"- [ ] `{SingleLine(testCommand)}` pasa sin errores.")
-          .AppendLine("- [ ] Cada requerimiento funcional está cubierto por al menos un test.")
-          .AppendLine("- [ ] El pipeline de CI sigue pasando en verde.")
-          .ToString();
+        sb.AppendLine()
+          .AppendLine("## Acceptance Criteria");
+        var acceptanceCriteria = ExtractAcceptanceCriteria(parsedBody);
+        var qualityGateLine = string.IsNullOrWhiteSpace(testCommand)
+            ? "- [ ] El proyecto compila y su suite de tests pasa."
+            : $"- [ ] `{SingleLine(testCommand)}` pasa sin errores.";
+        if (acceptanceCriteria.Count == 0)
+        {
+            // No recognized Acceptance Criteria section (or it only had template leftovers): keep the generic criteria.
+            sb.AppendLine(qualityGateLine)
+              .AppendLine("- [ ] Cada requerimiento funcional está cubierto por al menos un test.")
+              .AppendLine("- [ ] El pipeline de CI sigue pasando en verde.");
+        }
+        else
+        {
+            for (var i = 0; i < acceptanceCriteria.Count; i++)
+                sb.AppendLine($"- [ ] **AC-{i + 1:D2}:** {acceptanceCriteria[i]}");
+            sb.AppendLine(qualityGateLine);
+        }
+
+        return sb.ToString();
     }
 
-    // Top-level list items (task lists, bullets, numbered) of the Issue body become requirements.
-    private static List<string> ExtractRequirements(string body) =>
-        body.Split('\n')
+    // Issue section headings normalized with NormalizeHeading, used to classify each section of the body.
+    private static readonly HashSet<string> AcceptanceCriteriaHeadings = new(StringComparer.Ordinal)
+    {
+        "criterios de aceptacion",
+        "acceptance criteria",
+    };
+
+    private static readonly HashSet<string> TechnicalNotesHeadings = new(StringComparer.Ordinal)
+    {
+        "consideraciones tecnicas",
+        "technical notes",
+    };
+
+    // Top-level list items (task lists, bullets, numbered) of the non-AC, non-technical sections become requirements.
+    private static List<string> ExtractRequirements(string body)
+    {
+        var requirements = new List<string>();
+        foreach (var (sectionTitle, content) in SplitIntoSections(body))
+        {
+            if (IsAcceptanceCriteriaSection(sectionTitle) || IsTechnicalNotesSection(sectionTitle))
+                continue;
+
+            foreach (var bullet in ExtractBullets(content))
+            {
+                if (IsMeaningfulContent(bullet))
+                    requirements.Add(bullet);
+            }
+        }
+        return requirements;
+    }
+
+    // Bullets of the Acceptance Criteria section(s), with consecutive Dado/Cuando/Entonces (or Given/When/Then,
+    // with Y/And continuations) scenarios merged into a single criterion. Empty when there is no such section or
+    // it only contains template leftovers, so Render falls back to the generic criteria.
+    private static List<string> ExtractAcceptanceCriteria(string body)
+    {
+        var bullets = new List<string>();
+        foreach (var (sectionTitle, content) in SplitIntoSections(body))
+        {
+            if (IsAcceptanceCriteriaSection(sectionTitle))
+                bullets.AddRange(ExtractBullets(content));
+        }
+
+        var criteria = new List<string>();
+        foreach (var scenario in GroupScenarioBullets(bullets))
+        {
+            var text = string.Join(", ", scenario);
+            if (IsMeaningfulContent(text))
+                criteria.Add(text);
+        }
+        return criteria;
+    }
+
+    // Splits the Issue body by ATX headings (#, ##, ### — a level 4+ heading is not recognized and its text stays
+    // part of the enclosing section). The first element always holds the preamble (Title = null); when the body
+    // has no headings at all, the result is a single preamble section with the full body as Content. Lines inside
+    // a fenced code block (``` or ~~~) are never treated as headings, since a snippet comment like "# note" would
+    // otherwise be mistaken for an ATX heading and wrongly split or reclassify the section.
+    private static List<(string? Title, string Content)> SplitIntoSections(string body)
+    {
+        var sections = new List<(string? Title, string Content)>();
+        string? currentTitle = null;
+        var currentLines = new List<string>();
+        var inCodeFence = false;
+
+        foreach (var line in body.Split('\n'))
+        {
+            if (CodeFenceRegex().IsMatch(line))
+            {
+                inCodeFence = !inCodeFence;
+                currentLines.Add(line);
+                continue;
+            }
+
+            var heading = inCodeFence ? Match.Empty : HeadingRegex().Match(line);
+            if (heading.Success)
+            {
+                sections.Add((currentTitle, string.Join('\n', currentLines)));
+                currentTitle = heading.Groups[2].Value.Trim();
+                currentLines = [];
+            }
+            else
+            {
+                currentLines.Add(line);
+            }
+        }
+
+        sections.Add((currentTitle, string.Join('\n', currentLines)));
+        return sections;
+    }
+
+    private static bool IsAcceptanceCriteriaSection(string? title) =>
+        title is not null && AcceptanceCriteriaHeadings.Contains(NormalizeHeading(title));
+
+    private static bool IsTechnicalNotesSection(string? title) =>
+        title is not null && TechnicalNotesHeadings.Contains(NormalizeHeading(title));
+
+    /// <summary>ASCII, lowercase, space-collapsed heading key: no accents, no emoji/punctuation.</summary>
+    private static string NormalizeHeading(string title)
+    {
+        var ascii = new StringBuilder();
+        foreach (var c in (title ?? string.Empty).Normalize(NormalizationForm.FormD))
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+                ascii.Append(char.ToLowerInvariant(c));
+        }
+
+        return WhitespaceRegex().Replace(NonHeadingCharsRegex().Replace(ascii.ToString(), ""), " ").Trim();
+    }
+
+    private static List<string> ExtractBullets(string content) =>
+        content.Split('\n')
             .Select(l => RequirementLineRegex().Match(l))
             .Where(m => m.Success)
             .Select(m => m.Groups[1].Value.Trim())
-            .Where(r => r.Length > 0)
             .ToList();
+
+    // Groups consecutive scenario bullets: a "Dado"/"Given" bullet opens a group; while a group is open,
+    // "Cuando"/"When"/"Entonces"/"Then"/"Y"/"And" bullets extend it; any other bullet closes it and starts a new
+    // single-element group. Continuation words never merge anything unless a "Dado"/"Given" group is already open.
+    private static List<List<string>> GroupScenarioBullets(List<string> bullets)
+    {
+        var groups = new List<List<string>>();
+        var groupOpen = false;
+
+        foreach (var bullet in bullets)
+        {
+            var match = ScenarioKeywordRegex().Match(RemoveDiacritics(bullet).TrimStart());
+            var keyword = match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
+
+            if (keyword is "dado" or "given")
+            {
+                groups.Add([bullet]);
+                groupOpen = true;
+            }
+            else if (groupOpen && keyword is "cuando" or "when" or "entonces" or "then" or "y" or "and")
+            {
+                groups[^1].Add(bullet);
+            }
+            else
+            {
+                groups.Add([bullet]);
+                groupOpen = false;
+            }
+        }
+
+        return groups;
+    }
+
+    private static string RemoveDiacritics(string value)
+    {
+        var ascii = new StringBuilder();
+        foreach (var c in value.Normalize(NormalizationForm.FormD))
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+                ascii.Append(c);
+        }
+        return ascii.ToString();
+    }
+
+    // Discards empty bullets, bullets that are only a bold label (e.g. "**Agentes requeridos:**"), and the
+    // "Criterio N" placeholders left over from the old User Story template.
+    private static bool IsMeaningfulContent(string text)
+    {
+        var trimmed = text.Trim();
+        return trimmed.Length > 0
+            && !BoldLabelOnlyRegex().IsMatch(trimmed)
+            && !CriterioPlaceholderRegex().IsMatch(trimmed);
+    }
 
     private static string SingleLine(string? value) =>
         WhitespaceRegex().Replace(value ?? string.Empty, " ").Trim();
@@ -172,6 +349,27 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
+
+    [GeneratedRegex(@"^(#{1,3})\s+(.+?)\s*$")]
+    private static partial Regex HeadingRegex();
+
+    [GeneratedRegex(@"^\s*(?:```|~~~)")]
+    private static partial Regex CodeFenceRegex();
+
+    [GeneratedRegex(@"[^a-z0-9 ]")]
+    private static partial Regex NonHeadingCharsRegex();
+
+    [GeneratedRegex(@"<!--[\s\S]*?-->")]
+    private static partial Regex HtmlCommentRegex();
+
+    [GeneratedRegex(@"^\*\*[^*]+\*\*:?\s*$")]
+    private static partial Regex BoldLabelOnlyRegex();
+
+    [GeneratedRegex(@"^criterio\s+\d+$", RegexOptions.IgnoreCase)]
+    private static partial Regex CriterioPlaceholderRegex();
+
+    [GeneratedRegex(@"^(dado|given|cuando|when|entonces|then|y|and)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ScenarioKeywordRegex();
 }
 
 public sealed class SpecAlreadyExistsException(string path)
