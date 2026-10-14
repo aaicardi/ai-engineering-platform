@@ -1,4 +1,5 @@
 using AIHarness.Cli;
+using AIHarness.Diagnostics;
 using AIHarness.Execution;
 using AIHarness.GitHub;
 using AIHarness.Inspection;
@@ -34,6 +35,11 @@ using AIHarness.Specs;
 //                                                                   repositorio sin CLAUDE.md recibe el bootstrap greenfield
 //   AIHarness --version                                          -> versión de AIHarness y del runtime .NET
 //   AIHarness --status                                           -> estado: versión, runtime, SO y uptime del sistema
+//   AIHarness --health [--root <dir>]                            -> diagnóstico de gobernanza (CLAUDE.md, agentes, specs) y
+//                                                                   entorno (git, dotnet, claude y su sesión, gh y credenciales
+//                                                                   de GitHub) antes de ejecutar --process-issue; JSON en
+//                                                                   STDOUT, progreso en STDERR; código de salida 0/1 según
+//                                                                   el resultado
 // Without a root, it is discovered by walking up from the current directory.
 if (args.Contains("--version"))
 {
@@ -57,6 +63,7 @@ var generateSpec = false;
 var execute = false;
 var orchestrate = false;
 var createPr = false;
+var health = false;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -74,11 +81,27 @@ for (var i = 0; i < args.Length; i++)
         case "--create-pr": createPr = true; break;
         case "--process-issue" when i + 1 < args.Length: processIssueArg = args[++i]; break;
         case "--target-dir" when i + 1 < args.Length: targetDirArg = args[++i]; break;
+        case "--health": health = true; break;
         case var a when a.StartsWith("--", StringComparison.Ordinal):
             Console.Error.WriteLine($"[ERROR] Argumento inválido o sin valor: {a}");
             return 2;
         default: rootArg ??= args[i]; break;
     }
+}
+
+if (health)
+{
+    if (processIssueArg is not null || issueArg is not null || repoArg is not null || agentArg is not null || specArg is not null
+        || generateSpec || execute || orchestrate)
+    {
+        Console.Error.WriteLine(
+            "[ERROR] --health no se combina con --process-issue, --issue, --repo, --agent, --spec, --generate-spec, --execute ni --orchestrate.");
+        return 2;
+    }
+    var healthRoot = rootArg is not null
+        ? Path.GetFullPath(rootArg)
+        : RepositoryInspector.FindRepositoryRoot(Directory.GetCurrentDirectory()) ?? Directory.GetCurrentDirectory();
+    return await RunHealthAsync(healthRoot);
 }
 
 if (processIssueArg is not null)
@@ -346,6 +369,23 @@ static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
     {
         Console.Error.WriteLine($"[ERROR] {ex.Message}");
         return 127;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("[WARN] Ejecución cancelada por el usuario.");
+        return 130;
+    }
+}
+
+static async Task<int> RunHealthAsync(string root)
+{
+    using var cts = CancelOnCtrlC();
+    var diagnostics = new HealthDiagnostics(new AIHarness.Execution.ProcessRunner(), root, Console.Error);
+    try
+    {
+        var report = await diagnostics.RunAsync(cts.Token);
+        Console.WriteLine(report.ToJson());
+        return report.Healthy ? 0 : 1;
     }
     catch (OperationCanceledException)
     {

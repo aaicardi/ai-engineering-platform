@@ -66,6 +66,7 @@ Cada ejecución de `--process-issue` guarda en `~/.aiharness/runs/<owner>/<repo>
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude`) para `--execute`, `--orchestrate` y `--process-issue`
 - [GitHub CLI](https://cli.github.com/) (`gh`) para `--create-pr` y para clonar repositorios externos
 - Credenciales de GitHub: `GH_TOKEN`, `GITHUB_TOKEN` o una sesión de `gh auth login` (sin ellas el acceso es anónimo y con límite de tasa reducido). Solo se muestra el origen del token, nunca su valor.
+- `aiharness --health` es la forma soportada de verificar, antes de `--process-issue`, que la gobernanza del repositorio y las herramientas anteriores están disponibles.
 
 ### Compilación y pruebas
 ```bash
@@ -91,6 +92,7 @@ alias aiharness='dotnet run --project src/AIHarness --'
 | `aiharness --process-issue <n> [--agent <nombre>] [--repo <owner/name>] [--target-dir <dir>] [--base <rama>] [--create-pr]` | Pipeline completo desde el Issue (suite de agentes coordinada por `lead`; `--agent` ejecuta un solo agente de la suite) |
 | `aiharness --version` | Versión de AI Harness y del runtime .NET |
 | `aiharness --status` | Versión, runtime, sistema operativo y uptime |
+| `aiharness --health [--root <dir>]` | Diagnóstico de gobernanza (CLAUDE.md, agentes, specs) y de entorno (`git`, `dotnet`, `claude` y su sesión, `gh` y credenciales de GitHub) antes de ejecutar `--process-issue`: JSON en STDOUT (`"healthy"` y un `"checks"` por comprobación con `name`, `level` `critical`/`warning`, `ok` y `detail`), progreso en STDERR; código de salida 0 si `"healthy": true`, 1 en caso contrario |
 
 Ejemplo — procesar el Issue #42 de este repositorio y dejar el PR preparado para revisión humana:
 ```bash
@@ -208,3 +210,4 @@ Toda funcionalidad nueva debe contar con su especificación correspondiente en `
 | 013 | Suite de subagentes nativos y skills de stack |
 | 014 | Pipeline multiagente en `--process-issue` |
 | 015 | Mapeo de criterios de aceptación del Issue en la spec generada |
+| 016 | Diagnóstico de gobernanza y entorno (`--health`) |
