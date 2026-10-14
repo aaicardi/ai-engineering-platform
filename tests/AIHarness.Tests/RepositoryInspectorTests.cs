@@ -91,4 +91,17 @@ public sealed class RepositoryInspectorTests : IDisposable
         Assert.Equal(["data-engineer"], report.Agents.Unexpected);
         Assert.True(report.IsSuccessful);
     }
+
+    // AC-03 (OpenSpec 018, Issue #51) regression: RepositoryInspector.InspectSpecs lists every *.md file in the
+    // specs directory with no digit-prefix filter at all, so a spec numbered after a 4+ digit Issue is already
+    // recognized without any production change.
+    [Fact]
+    public void Inspect_SpecWithFourDigitIssueNumberPrefix_IsListedInSpecsAudit()
+    {
+        File.WriteAllText(Path.Combine(_root, "openspec", "specs", "1234-algo.md"), "# OpenSpec 1234: Algo\n");
+
+        var specs = Inspect().Specs.Specs;
+
+        Assert.Contains(specs, s => s.FileName == "1234-algo.md");
+    }
 }

@@ -21,7 +21,8 @@ using AIHarness.Specs;
 //                                                                   (el push requiere aprobación humana explícita)
 //   AIHarness --issue <number> [--repo <owner/name>]             -> detalles de un Issue de GitHub
 //                                                                   (token: GH_TOKEN, GITHUB_TOKEN o sesión de gh; repo: remote origin)
-//   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md (nunca sobrescribe)
+//   AIHarness --issue <number> --generate-spec [--root <dir>]    -> además genera openspec/specs/NNN-<slug>.md, donde NNN es el
+//                                                                   número del Issue (nunca sobrescribe ni renumera)
 //   AIHarness --process-issue <number> [--agent <name>] [--repo <owner/name>] [--target-dir <dir>] [--base <branch>] [--create-pr] [--root <dir>] [--no-save]
 //                                                                -> pipeline completo: obtiene el Issue, crea/cambia a
 //                                                                   feature/<issue>-<slug>, genera (o reutiliza) la spec, ejecuta

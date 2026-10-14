@@ -9,7 +9,9 @@ namespace AIHarness.Specs;
 public sealed record GeneratedSpec(int Number, string FileName, string FilePath, string Content);
 
 /// <summary>
-/// Builds OpenSpec drafts from GitHub Issues and saves them as <c>NNN-&lt;slug&gt;.md</c> inside the specs directory.
+/// Builds OpenSpec drafts from GitHub Issues and saves them as <c>NNN-&lt;slug&gt;.md</c> inside the specs directory,
+/// where <c>NNN</c> (3 or more digits) is the source Issue's number — never a recalculated "next free number".
+/// Hand-written specs (not generated from an Issue) keep their own sequential numbering via <see cref="NextSpecNumber"/>.
 /// Performs no console output so it can be reused by other front-ends.
 /// </summary>
 /// <param name="testCommand">
@@ -23,7 +25,14 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
 
     /// <summary>Renders the draft and writes it without ever overwriting an existing file.</summary>
     /// <exception cref="DirectoryNotFoundException">The specs directory does not exist (it is never created here).</exception>
-    /// <exception cref="SpecAlreadyExistsException">A spec with the same slug already exists.</exception>
+    /// <exception cref="SpecAlreadyExistsException">
+    /// A spec for this Issue already exists: same number and slug, or the same slug under a
+    /// sequential number assigned before Issue-based numbering.
+    /// </exception>
+    /// <exception cref="SpecNumberConflictException">
+    /// A spec with the same number but a different slug already exists (e.g. the Issue was renamed, or the number
+    /// was reused by another spec).
+    /// </exception>
     public GeneratedSpec Generate(GitHubIssue issue)
     {
         ArgumentNullException.ThrowIfNull(issue);
@@ -32,19 +41,37 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
         if (!Directory.Exists(directory))
             throw new DirectoryNotFoundException($"No existe el directorio de especificaciones: {directory}");
 
+        var number = issue.Number;
         var slug = Slugify(issue.Title, issue.Number);
-        var existing = Directory.GetFiles(directory, $"*-{slug}.md")
-            .Select(Path.GetFileName)
-            .OfType<string>()
-            .FirstOrDefault(f => SpecPrefixRegex().IsMatch(f) && f[(f.IndexOf('-') + 1)..] == slug + ".md");
-        if (existing is not null)
-            throw new SpecAlreadyExistsException(Path.Combine(directory, existing));
-
-        var number = NextSpecNumber(directory);
         var fileName = $"{number:D3}-{slug}.md";
         var filePath = Path.GetFullPath(Path.Combine(directory, fileName));
         if (Path.GetDirectoryName(filePath) != directory.TrimEnd(Path.DirectorySeparatorChar))
             throw new InvalidOperationException($"Ruta de salida fuera del directorio de especificaciones: {filePath}");
+
+        // Same Issue number: an exact file-name match (same slug too) means "regenerate the same Issue" and keeps
+        // today's SpecAlreadyExistsException; any other file with that number is a genuine number collision. The
+        // exact match is searched for among *all* same-number files before any other is reported as "the conflict"
+        // (a directory can hold siblings like "005-foo.md" and "005-foo-implementation-plan.md" with the same prefix).
+        var sameNumberFiles = Directory.GetFiles(directory, "*.md")
+            .Select(Path.GetFileName)
+            .OfType<string>()
+            .Where(f => SpecPrefixRegex().Match(f) is { Success: true } m
+                && int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) == number)
+            .ToList();
+        if (sameNumberFiles.Contains(fileName))
+            throw new SpecAlreadyExistsException(Path.Combine(directory, fileName));
+
+        // Specs generated before Issue-based numbering carry a sequential number: the same slug under any number is
+        // still this Issue's spec, so an interrupted run resumes on it instead of writing a duplicate.
+        var legacy = Directory.GetFiles(directory, $"*-{slug}.md")
+            .Select(Path.GetFileName)
+            .OfType<string>()
+            .FirstOrDefault(f => SpecPrefixRegex().IsMatch(f) && f[(f.IndexOf('-') + 1)..] == slug + ".md");
+        if (legacy is not null)
+            throw new SpecAlreadyExistsException(Path.Combine(directory, legacy));
+
+        if (sameNumberFiles.Count > 0)
+            throw new SpecNumberConflictException(Path.Combine(directory, sameNumberFiles[0]), number);
 
         var content = Render(issue, number, testCommand);
 
@@ -68,7 +95,10 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
         return new GeneratedSpec(number, fileName, filePath, content);
     }
 
-    /// <summary>Next free spec number: highest <c>NNN-</c> prefix in <paramref name="directory"/> plus one.</summary>
+    /// <summary>
+    /// Next free spec number for a hand-written spec: highest <c>NNN-</c> prefix in <paramref name="directory"/>
+    /// plus one. Not used by <see cref="Generate"/>, which numbers Issue-sourced specs after the Issue itself.
+    /// </summary>
     public static int NextSpecNumber(string directory) =>
         Directory.GetFiles(directory, "*.md")
             .Select(f => SpecPrefixRegex().Match(Path.GetFileName(f)))
@@ -160,7 +190,13 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
         {
             for (var i = 0; i < acceptanceCriteria.Count; i++)
                 sb.AppendLine($"- [ ] **AC-{i + 1:D2}:** {acceptanceCriteria[i]}");
-            sb.AppendLine(qualityGateLine);
+
+            // Skip the generic Quality Gate line when the Issue's own criteria already mention the test command
+            // (e.g. "- [ ] `dotnet test` pasa."), so the generated spec never duplicates that criterion.
+            var alreadyCovered = !string.IsNullOrWhiteSpace(testCommand)
+                && acceptanceCriteria.Any(c => c.Contains(testCommand, StringComparison.OrdinalIgnoreCase));
+            if (!alreadyCovered)
+                sb.AppendLine(qualityGateLine);
         }
 
         return sb.ToString();
@@ -372,7 +408,8 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
     private static string SingleLine(string? value) =>
         WhitespaceRegex().Replace(value ?? string.Empty, " ").Trim();
 
-    [GeneratedRegex(@"^(\d{3})-.+\.md$")]
+    // At most 9 digits, so the prefix always fits in an int.
+    [GeneratedRegex(@"^(\d{3,9})-.+\.md$")]
     private static partial Regex SpecPrefixRegex();
 
     [GeneratedRegex(@"[^a-z0-9]+")]
@@ -410,4 +447,11 @@ public sealed class SpecAlreadyExistsException(string path)
     : IOException($"Ya existe una especificación para este Issue: {path}. No se sobrescribe; elimínela o renómbela para regenerarla.")
 {
     public string ExistingPath { get; } = path;
+}
+
+public sealed class SpecNumberConflictException(string existingPath, int number)
+    : IOException($"Ya existe una especificación con el número {number:D3}: {existingPath}. No se sobrescribe ni se renumera; elimínela, renómbrela, o confirme que el número de Issue es el correcto antes de regenerar.")
+{
+    public string ExistingPath { get; } = existingPath;
+    public int Number { get; } = number;
 }
