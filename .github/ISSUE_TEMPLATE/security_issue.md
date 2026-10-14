@@ -1,7 +1,7 @@
 ---
 name: Security Issue
 about: Reporte interno de seguridad o vulnerabilidad
-title: '[SECURITY]: '
+title: 'fix(security): '
 labels: 'type:security'
 assignees: ''
 ---

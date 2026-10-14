@@ -1,7 +1,7 @@
 ---
 name: Technical Debt
 about: Refactorización o mejora de deuda técnica
-title: '[TECH-DEBT]: '
+title: 'refactor: '
 labels: 'type:tech-debt'
 assignees: ''
 ---

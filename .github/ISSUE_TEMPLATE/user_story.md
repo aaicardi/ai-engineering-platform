@@ -2,7 +2,7 @@
 name: User Story
 about: Definición de una nueva funcionalidad para la plataforma
 title: 'feat: '
-labels: 'enhancement'
+labels: 'type:feature'
 assignees: ''
 ---
 
