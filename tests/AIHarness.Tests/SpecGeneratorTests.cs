@@ -1,4 +1,5 @@
 using AIHarness.GitHub;
+using AIHarness.Orchestration;
 using AIHarness.Specs;
 
 namespace AIHarness.Tests;
@@ -22,13 +23,18 @@ public sealed class SpecGeneratorTests : IDisposable
     private static GitHubIssue Issue(string title = "Añadir exportación CSV", string? body = null, params string[] labels) =>
         new(42, title, body, "octocat", "open", labels, "https://github.com/owner/repo/issues/42");
 
+    private static GitHubIssue IssueNumbered(int number, string title, string? body = null) =>
+        new(number, title, body, "octocat", "open", [], $"https://github.com/owner/repo/issues/{number}");
+
     [Fact]
-    public void Generate_WritesNextNumberedSpecInsideSpecsDirectory()
+    public void Generate_WritesSpecNumberedAfterTheIssueInsideSpecsDirectory()
     {
         var spec = new SpecGenerator(_specs).Generate(Issue());
 
-        Assert.Equal(6, spec.Number);
-        Assert.Equal("006-anadir-exportacion-csv.md", spec.FileName);
+        // The spec number is the Issue's own number (42), never a recalculated "next free number"
+        // (the directory's highest existing prefix, 005, plus one, would have been 6).
+        Assert.Equal(42, spec.Number);
+        Assert.Equal("042-anadir-exportacion-csv.md", spec.FileName);
         Assert.Equal(Path.Combine(_specs, spec.FileName), spec.FilePath);
         Assert.Equal(spec.Content, File.ReadAllText(spec.FilePath));
         // Nothing else created: no stray temp files, no new folders.
@@ -383,6 +389,8 @@ public sealed class SpecGeneratorTests : IDisposable
 
     // RF-06: when there is a recognized Acceptance Criteria section, the Quality Gate line is still the last
     // element even when a repository-specific test command is configured.
+    // AC-06 (spec 018): the Issue's own criteria never mention the test command, so the Quality Gate line is
+    // still appended, and it is the only mention of that command in the generated section.
     [Fact]
     public void Render_AcceptanceCriteriaSection_WithTestCommand_PutsQualityGateLast()
     {
@@ -394,6 +402,7 @@ public sealed class SpecGeneratorTests : IDisposable
 
         Assert.Contains("- [ ] **AC-01:** Primer criterio", acSection);
         Assert.Contains("- [ ] **AC-02:** Segundo criterio", acSection);
+        Assert.Equal(1, acSection.Split("npm test").Length - 1);
         Assert.EndsWith("- [ ] `npm test` pasa sin errores.\n", acSection);
         Assert.DoesNotContain("El proyecto compila", acSection);
     }
@@ -544,5 +553,137 @@ public sealed class SpecGeneratorTests : IDisposable
         Assert.DoesNotContain("Esto parece una viñeta pero es código", generatedSections);
         // The raw Issue body is still quoted verbatim in Context & Objectives: that is unrelated to RF-02.
         Assert.Contains("> - [ ] Esto parece una viñeta pero es código", content);
+    }
+
+    // --- OpenSpec 018 (Issue #51): Issue-number-based spec numbering, number-conflict detection and
+    // no-duplicate-Quality-Gate line. Added by tester per the implementation plan's Test Strategy table. ---
+
+    // AC-01: the spec number is the Issue's own number (never a recalculated "next free number"), and the
+    // title heading carries that same number.
+    [Fact]
+    public void Generate_Issue52_CreatesFileNamedAfterTheIssueNumberWithMatchingHeading()
+    {
+        var issue = IssueNumbered(52, "fix(specs): Algo");
+
+        var spec = new SpecGenerator(_specs).Generate(issue);
+
+        Assert.Equal(52, spec.Number);
+        Assert.Equal("052-fix-specs-algo.md", spec.FileName);
+        Assert.StartsWith("# OpenSpec 052:", spec.Content);
+    }
+
+    // AC-02: two different Issues on the same directory never collide, regardless of the order they are
+    // generated in (no "next free number" race is possible once the number is the Issue's own).
+    [Theory]
+    [InlineData(52, 53)]
+    [InlineData(53, 52)]
+    public void Generate_TwoDifferentIssuesOnSameDirectory_NeverCollideRegardlessOfOrder(int firstNumber, int secondNumber)
+    {
+        var issue52 = IssueNumbered(52, "fix(specs): Algo cincuenta y dos");
+        var issue53 = IssueNumbered(53, "fix(specs): Algo cincuenta y tres");
+        var generator = new SpecGenerator(_specs);
+
+        generator.Generate(firstNumber == 52 ? issue52 : issue53);
+        generator.Generate(secondNumber == 52 ? issue52 : issue53);
+
+        Assert.True(File.Exists(Path.Combine(_specs, "052-fix-specs-algo-cincuenta-y-dos.md")));
+        Assert.True(File.Exists(Path.Combine(_specs, "053-fix-specs-algo-cincuenta-y-tres.md")));
+    }
+
+    // AC-03: an Issue numbered with 4+ digits writes a file whose name starts with the full number (never
+    // truncated to 3 digits), and SpecMetadata.Parse (the "Orchestration" consumer named by the Issue) recognizes
+    // that same number from the generated content.
+    [Fact]
+    public void Generate_Issue1234_CreatesFileStartingWithFullFourDigitNumberRecognizedBySpecMetadata()
+    {
+        var issue = IssueNumbered(1234, "fix(specs): Numero largo de Issue");
+
+        var spec = new SpecGenerator(_specs).Generate(issue);
+
+        Assert.StartsWith("1234-", spec.FileName);
+        var metadata = SpecMetadata.Parse(spec.FileName, spec.Content);
+        Assert.Equal(1234, metadata.IssueNumber);
+    }
+
+    // AC-04: a directory that already has a spec with the same number but a different slug makes Generate fail
+    // naming that exact file, without overwriting it or writing a new one under a different slug.
+    [Fact]
+    public void Generate_SameIssueNumberAsAnExistingFileWithADifferentSlug_ThrowsSpecNumberConflictAndKeepsFileIntact()
+    {
+        var existingPath = Path.Combine(_specs, "052-otro-slug.md");
+        File.WriteAllText(existingPath, "# OpenSpec 052: Otro slug\n");
+        var issue = IssueNumbered(52, "fix(specs): Titulo completamente distinto");
+
+        var ex = Assert.Throws<SpecNumberConflictException>(() => new SpecGenerator(_specs).Generate(issue));
+
+        Assert.Equal(existingPath, ex.ExistingPath);
+        Assert.Equal(52, ex.Number);
+        Assert.Equal("# OpenSpec 052: Otro slug\n", File.ReadAllText(existingPath));
+        Assert.False(File.Exists(Path.Combine(_specs, "052-fix-specs-titulo-completamente-distinto.md")));
+        // Nothing else created beyond the 3 seeded by the constructor plus this test's own "052-otro-slug.md".
+        Assert.Equal(4, Directory.GetFiles(_specs).Length);
+    }
+
+    // AC-04 (enumeration-order edge case, implementation plan "Approach"/task 10): when two existing files share
+    // the colliding number (e.g. "005-openspec-generator.md" and its "-implementation-plan.md" sibling, already
+    // seeded by the constructor) and neither is an exact match for the newly computed file name, Generate must
+    // report a number conflict — never silently pick the exact-match path for an Issue that was never generated.
+    [Fact]
+    public void Generate_IssueNumberCollidesWithTwoExistingSameNumberSiblings_ThrowsSpecNumberConflictNotAlreadyExists()
+    {
+        var issue = IssueNumbered(5, "fix(specs): Algo completamente distinto");
+
+        var ex = Assert.Throws<SpecNumberConflictException>(() => new SpecGenerator(_specs).Generate(issue));
+
+        Assert.Equal(5, ex.Number);
+        Assert.True(
+            ex.ExistingPath.EndsWith("005-openspec-generator.md", StringComparison.Ordinal)
+                || ex.ExistingPath.EndsWith("005-openspec-generator-implementation-plan.md", StringComparison.Ordinal));
+        // Neither existing "005-*" file is touched, and no third file is created.
+        Assert.Equal(3, Directory.GetFiles(_specs).Length);
+    }
+
+    // AC-05: when the Issue's own Acceptance Criteria already include a bullet mentioning the configured test
+    // command, the generated Acceptance Criteria section contains exactly one mention of it (the Issue's own
+    // bullet), never a second, generator-added Quality Gate line for the same command.
+    [Fact]
+    public void Render_AcceptanceCriteriaAlreadyMentionsTheTestCommand_OnlyOneMentionInGeneratedSection()
+    {
+        var body = "## Criterios de Aceptación\n- [ ] `dotnet test` pasa.";
+
+        var content = SpecGenerator.Render(Issue(body: body), 18, "dotnet test").ReplaceLineEndings("\n");
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var acSection = content[acStart..];
+
+        Assert.Equal(1, acSection.Split("dotnet test").Length - 1);
+        Assert.Contains("- [ ] **AC-01:** `dotnet test` pasa.", acSection);
+    }
+
+    // AC-05 (case-insensitive variant): the Issue's own bullet mentions the test command with different
+    // casing than the configured command; the substring match (OrdinalIgnoreCase, per the implementation plan)
+    // still recognizes it as already covered and skips the Quality Gate line.
+    [Fact]
+    public void Render_AcceptanceCriteriaMentionsTestCommandWithDifferentCasing_StillSkipsQualityGateLine()
+    {
+        var body = "## Criterios de Aceptación\n- [ ] `Dotnet Test` pasa.";
+
+        var content = SpecGenerator.Render(Issue(body: body), 18, "dotnet test").ReplaceLineEndings("\n");
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var acSection = content[acStart..];
+
+        Assert.DoesNotContain("- [ ] `dotnet test` pasa sin errores.", acSection);
+        Assert.Contains("- [ ] **AC-01:** `Dotnet Test` pasa.", acSection);
+    }
+
+    // RF-04 (implementation plan "Risks", accepted side effect, not a defect): NextSpecNumber keeps scanning
+    // every SpecPrefixRegex match regardless of digit count, so a hand-written spec created after an Issue
+    // numbered with 4+ digits jumps straight past it instead of continuing the small sequential numbering.
+    // Documented here as a regression guard, not a requirement to keep them independent.
+    [Fact]
+    public void NextSpecNumber_AfterAFourDigitIssueSpecExists_JumpsPastItInsteadOfStayingSequential()
+    {
+        new SpecGenerator(_specs).Generate(IssueNumbered(1234, "fix(specs): Numero largo de Issue"));
+
+        Assert.Equal(1235, SpecGenerator.NextSpecNumber(_specs));
     }
 }

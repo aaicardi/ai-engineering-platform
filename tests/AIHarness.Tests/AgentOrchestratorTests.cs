@@ -312,7 +312,7 @@ public sealed class AgentOrchestratorTests : IDisposable
     }
 
     private const string IssueBranch = "feature/31-feat-orchestration-add-unified-process-issue-flag";
-    private const string IssueSpecFileName = "009-feat-orchestration-add-unified-process-issue-flag.md";
+    private const string IssueSpecFileName = "031-feat-orchestration-add-unified-process-issue-flag.md";
 
     private static readonly GitHubIssue Issue = new(
         31, "feat(orchestration): Add unified --process-issue flag", "- Chain every stage", "octocat", "open", [],
@@ -362,9 +362,11 @@ public sealed class AgentOrchestratorTests : IDisposable
     [Fact]
     public async Task ProcessIssueAsync_ExistingSpec_IsReusedInsteadOfGenerated()
     {
-        const string existing = "010-feat-orchestration-add-unified-process-issue-flag.md";
+        // Same number (the Issue's) and same slug as Generate would compute for Issue, so the exact-name match
+        // keeps today's "reuse the existing spec" path (SpecAlreadyExistsException), not a number conflict.
+        const string existing = "031-feat-orchestration-add-unified-process-issue-flag.md";
         var existingPath = Path.Combine(_root, "openspec", "specs", existing);
-        File.WriteAllText(existingPath, "# OpenSpec 010: feat(orchestration): Edited by hand\n\nCloses #31\n");
+        File.WriteAllText(existingPath, "# OpenSpec 031: feat(orchestration): Edited by hand\n\nCloses #31\n");
         string? requestedSpec = null;
 
         var result = await new AgentOrchestrator(IssueHappyPath(), _root, TextWriter.Null, _error)
@@ -372,8 +374,10 @@ public sealed class AgentOrchestratorTests : IDisposable
 
         Assert.True(result.Succeeded);
         Assert.Equal(existing, requestedSpec);
-        Assert.False(File.Exists(Path.Combine(_root, "openspec", "specs", "011-feat-orchestration-add-unified-process-issue-flag.md")));
-        Assert.Equal("# OpenSpec 010: feat(orchestration): Edited by hand\n\nCloses #31\n", File.ReadAllText(existingPath));
+        // No other file was generated for this number: only the two specs seeded for this test class exist
+        // (the unrelated "008-*" fixture from the constructor and this test's own "031-*").
+        Assert.Equal(2, Directory.GetFiles(Path.Combine(_root, "openspec", "specs")).Length);
+        Assert.Equal("# OpenSpec 031: feat(orchestration): Edited by hand\n\nCloses #31\n", File.ReadAllText(existingPath));
     }
 
     [Fact]
