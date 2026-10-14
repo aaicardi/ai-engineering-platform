@@ -1,4 +1,4 @@
-# OpenSpec 018: fix(specs): Number Issue specs by Issue number and avoid a duplicate Quality Gate criterion
+# OpenSpec 051: fix(specs): Number Issue specs by Issue number and avoid a duplicate Quality Gate criterion
 
 ## Issue Reference
 Closes #51

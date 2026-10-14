@@ -57,6 +57,31 @@ public sealed class SpecGeneratorTests : IDisposable
     }
 
     [Fact]
+    public void Generate_LegacySequentialSpecWithSameSlug_IsReportedAsExistingInsteadOfDuplicated()
+    {
+        // Generated before Issue-based numbering: sequential number (018), same slug as Issue #42 would get.
+        var legacyPath = Path.Combine(_specs, "018-anadir-exportacion-csv.md");
+        File.WriteAllText(legacyPath, "# OpenSpec 018");
+
+        var ex = Assert.Throws<SpecAlreadyExistsException>(() => new SpecGenerator(_specs).Generate(Issue()));
+
+        Assert.Equal(legacyPath, ex.ExistingPath);
+        Assert.False(File.Exists(Path.Combine(_specs, "042-anadir-exportacion-csv.md")));
+        Assert.Equal("# OpenSpec 018", File.ReadAllText(legacyPath));
+    }
+
+    [Fact]
+    public void Generate_FileWithPrefixTooLongForAnInt_IsIgnoredWithoutOverflow()
+    {
+        File.WriteAllText(Path.Combine(_specs, "99999999999-overflow.md"), "# Not a spec");
+
+        var spec = new SpecGenerator(_specs).Generate(Issue());
+
+        Assert.Equal("042-anadir-exportacion-csv.md", spec.FileName);
+        Assert.Equal(43, SpecGenerator.NextSpecNumber(_specs));
+    }
+
+    [Fact]
     public void Generate_MissingSpecsDirectory_ThrowsWithoutCreatingIt()
     {
         var missing = Path.Combine(_root, "nope", "specs");

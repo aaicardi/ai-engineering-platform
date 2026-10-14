@@ -396,6 +396,25 @@ public sealed class AgentOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public async Task ProcessIssueAsync_SpecNumberTakenByAnotherSlug_FailsInSpecStageNamingTheFile()
+    {
+        const string other = "031-some-other-spec.md";
+        var otherPath = Path.Combine(_root, "openspec", "specs", other);
+        File.WriteAllText(otherPath, "# OpenSpec 031: other");
+        var runner = IssueHappyPath();
+
+        var result = await new AgentOrchestrator(runner, _root, TextWriter.Null, _error)
+            .ProcessIssueAsync(Issue, spec => new PromptContext("developer", spec, "# Prompt"));
+
+        Assert.Equal(OrchestrationStage.Spec, result.Stage);
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains($"[ERROR] [Spec] Ya existe una especificación con el número 031: {otherPath}", _error.ToString());
+        Assert.False(File.Exists(IssueSpecPath));
+        Assert.Equal("# OpenSpec 031: other", File.ReadAllText(otherPath));
+        Assert.DoesNotContain(runner.Requests, r => r.FileName == "claude");
+    }
+
+    [Fact]
     public async Task ProcessIssueAsync_PromptCannotBeBuilt_FailsInSpecStageWithoutRunningTheAgent()
     {
         var runner = IssueHappyPath();

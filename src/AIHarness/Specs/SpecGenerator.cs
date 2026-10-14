@@ -25,7 +25,10 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
 
     /// <summary>Renders the draft and writes it without ever overwriting an existing file.</summary>
     /// <exception cref="DirectoryNotFoundException">The specs directory does not exist (it is never created here).</exception>
-    /// <exception cref="SpecAlreadyExistsException">A spec for this exact Issue (same number and slug) already exists.</exception>
+    /// <exception cref="SpecAlreadyExistsException">
+    /// A spec for this Issue already exists: same number and slug, or the same slug under a
+    /// sequential number assigned before Issue-based numbering.
+    /// </exception>
     /// <exception cref="SpecNumberConflictException">
     /// A spec with the same number but a different slug already exists (e.g. the Issue was renamed, or the number
     /// was reused by another spec).
@@ -57,6 +60,16 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
             .ToList();
         if (sameNumberFiles.Contains(fileName))
             throw new SpecAlreadyExistsException(Path.Combine(directory, fileName));
+
+        // Specs generated before Issue-based numbering carry a sequential number: the same slug under any number is
+        // still this Issue's spec, so an interrupted run resumes on it instead of writing a duplicate.
+        var legacy = Directory.GetFiles(directory, $"*-{slug}.md")
+            .Select(Path.GetFileName)
+            .OfType<string>()
+            .FirstOrDefault(f => SpecPrefixRegex().IsMatch(f) && f[(f.IndexOf('-') + 1)..] == slug + ".md");
+        if (legacy is not null)
+            throw new SpecAlreadyExistsException(Path.Combine(directory, legacy));
+
         if (sameNumberFiles.Count > 0)
             throw new SpecNumberConflictException(Path.Combine(directory, sameNumberFiles[0]), number);
 
@@ -395,7 +408,8 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
     private static string SingleLine(string? value) =>
         WhitespaceRegex().Replace(value ?? string.Empty, " ").Trim();
 
-    [GeneratedRegex(@"^(\d{3,})-.+\.md$")]
+    // At most 9 digits, so the prefix always fits in an int.
+    [GeneratedRegex(@"^(\d{3,9})-.+\.md$")]
     private static partial Regex SpecPrefixRegex();
 
     [GeneratedRegex(@"[^a-z0-9]+")]
