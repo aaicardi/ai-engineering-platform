@@ -131,8 +131,9 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
                 sb.AppendLine(line.Length == 0 ? ">" : $"> {line}");
         }
 
-        // Comments are stripped only for RF/AC extraction; the quoted body above stays verbatim.
-        var parsedBody = HtmlCommentRegex().Replace(body, "");
+        // Comments are stripped and fenced code blocks are masked only for RF/AC extraction; the quoted
+        // body above stays verbatim.
+        var parsedBody = MaskFencedCodeBlocks(HtmlCommentRegex().Replace(body, ""));
 
         sb.AppendLine()
           .AppendLine("## Functional Requirements");
@@ -220,26 +221,18 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
 
     // Splits the Issue body by ATX headings (#, ##, ### — a level 4+ heading is not recognized and its text stays
     // part of the enclosing section). The first element always holds the preamble (Title = null); when the body
-    // has no headings at all, the result is a single preamble section with the full body as Content. Lines inside
-    // a fenced code block (``` or ~~~) are never treated as headings, since a snippet comment like "# note" would
-    // otherwise be mistaken for an ATX heading and wrongly split or reclassify the section.
+    // has no headings at all, the result is a single preamble section with the full body as Content. Fenced code
+    // block content is masked upstream by MaskFencedCodeBlocks (called from Render before this method runs), so a
+    // snippet comment like "# note" never reaches this method as a line that could be mistaken for an ATX heading.
     private static List<(string? Title, string Content)> SplitIntoSections(string body)
     {
         var sections = new List<(string? Title, string Content)>();
         string? currentTitle = null;
         var currentLines = new List<string>();
-        var inCodeFence = false;
 
         foreach (var line in body.Split('\n'))
         {
-            if (CodeFenceRegex().IsMatch(line))
-            {
-                inCodeFence = !inCodeFence;
-                currentLines.Add(line);
-                continue;
-            }
-
-            var heading = inCodeFence ? Match.Empty : HeadingRegex().Match(line);
+            var heading = HeadingRegex().Match(line);
             if (heading.Success)
             {
                 sections.Add((currentTitle, string.Join('\n', currentLines)));
@@ -254,6 +247,45 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
 
         sections.Add((currentTitle, string.Join('\n', currentLines)));
         return sections;
+    }
+
+    // Blanks out (replaces with an empty line, preserving the line count so nothing downstream shifts) every
+    // line of literal content inside an open fenced code block, leaving the opening/closing delimiter lines
+    // untouched. Per CommonMark, a fence closes only on a line whose run is the *same character* (` or ~) and
+    // whose length is *greater than or equal to* the opener's; any other fence-looking line (a different
+    // character, or the same character but a shorter run) is content, not a closer. Called upstream of
+    // SplitIntoSections/ExtractBullets so neither needs its own fence-awareness.
+    private static string MaskFencedCodeBlocks(string body)
+    {
+        var lines = body.Split('\n');
+        char? fenceChar = null;
+        var fenceLength = 0;
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var fence = FenceDelimiterRegex().Match(lines[i]);
+
+            if (fenceChar is null)
+            {
+                if (fence.Success)
+                {
+                    fenceChar = fence.Groups[1].Value[0];
+                    fenceLength = fence.Groups[1].Value.Length;
+                }
+                continue; // not inside a fence: line stays untouched
+            }
+
+            if (fence.Success && fence.Groups[1].Value[0] == fenceChar && fence.Groups[1].Value.Length >= fenceLength)
+            {
+                fenceChar = null;
+                fenceLength = 0;
+                continue; // closing delimiter: same character, length >= opener's
+            }
+
+            lines[i] = string.Empty; // literal code content: never a heading nor a bullet downstream
+        }
+
+        return string.Join('\n', lines);
     }
 
     private static bool IsAcceptanceCriteriaSection(string? title) =>
@@ -275,6 +307,8 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
         return WhitespaceRegex().Replace(NonHeadingCharsRegex().Replace(ascii.ToString(), ""), " ").Trim();
     }
 
+    // Fence-safety here relies entirely on MaskFencedCodeBlocks having already blanked out any fenced code
+    // content before this method (or SplitIntoSections) ever sees it; this method has no fence logic of its own.
     private static List<string> ExtractBullets(string content) =>
         content.Split('\n')
             .Select(l => RequirementLineRegex().Match(l))
@@ -353,8 +387,8 @@ public sealed partial class SpecGenerator(string specsDirectory, string? testCom
     [GeneratedRegex(@"^(#{1,3})\s+(.+?)\s*$")]
     private static partial Regex HeadingRegex();
 
-    [GeneratedRegex(@"^\s*(?:```|~~~)")]
-    private static partial Regex CodeFenceRegex();
+    [GeneratedRegex(@"^\s*(`{3,}|~{3,})")]
+    private static partial Regex FenceDelimiterRegex();
 
     [GeneratedRegex(@"[^a-z0-9 ]")]
     private static partial Regex NonHeadingCharsRegex();
