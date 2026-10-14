@@ -430,4 +430,119 @@ public sealed class SpecGeneratorTests : IDisposable
         Assert.Contains("- [ ] **AC-02:** Segundo criterio", content);
         Assert.DoesNotContain("RF-01:** Segundo criterio", content);
     }
+
+    // --- OpenSpec 016 (Issue #47): fence-type/length-aware masking of fenced code block content before RF/AC
+    // extraction. Added by tester per the implementation plan's Test Strategy table. ---
+
+    // AC-01: an open ``` fence containing a bare ~~~ line (different character, so it never closes the fence)
+    // followed by a line that looks like an "## Criterios de Aceptación" heading: both stay masked code content,
+    // the fake heading never opens an AC section, and the bullets before/after the fence are both RF under the
+    // single "Requisitos" section.
+    [Fact]
+    public void Render_OpenBacktickFenceWithTildeLineThenFakeHeading_NeverClosesOrOpensAcSection()
+    {
+        var body = "## Requisitos\n- Primero\n```\n~~~\n## Criterios de Aceptación\n```\n- Segundo";
+
+        var content = SpecGenerator.Render(Issue(body: body), 10).ReplaceLineEndings("\n");
+        var rfStart = content.IndexOf("## Functional Requirements", StringComparison.Ordinal);
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var rfSection = content[rfStart..acStart];
+        var acSection = content[acStart..];
+
+        Assert.Contains("- **RF-01:** Primero", rfSection);
+        Assert.Contains("- **RF-02:** Segundo", rfSection);
+        Assert.DoesNotContain("RF-03", rfSection);
+        Assert.DoesNotContain("AC-0", content);
+        // The fake heading never splits a second section: only one "## Requisitos"-derived section exists.
+        Assert.Equal(
+            "## Acceptance Criteria\n"
+                + "- [ ] El proyecto compila y su suite de tests pasa.\n"
+                + "- [ ] Cada requerimiento funcional está cubierto por al menos un test.\n"
+                + "- [ ] El pipeline de CI sigue pasando en verde.\n",
+            acSection);
+    }
+
+    // AC-02: an open ```` (4-backtick) fence containing a bare ``` (3-backtick, same character but a shorter
+    // run) line must not close the fence, so a fake heading right after it stays masked content too; the only
+    // real bullet is the one after the real (4-backtick) closing delimiter.
+    [Fact]
+    public void Render_OpenFourBacktickFenceWithThreeBacktickLine_DoesNotCloseEarly()
+    {
+        var body = "## Requisitos\n````\n```\n## No es un encabezado\n````\n- Requisito real";
+
+        var content = SpecGenerator.Render(Issue(body: body), 10).ReplaceLineEndings("\n");
+        var rfStart = content.IndexOf("## Functional Requirements", StringComparison.Ordinal);
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var rfSection = content[rfStart..acStart];
+        var generatedSections = content[rfStart..];
+
+        Assert.Contains("- **RF-01:** Requisito real", rfSection);
+        Assert.DoesNotContain("RF-02", rfSection);
+        Assert.DoesNotContain("AC-0", content);
+        Assert.DoesNotContain("No es un encabezado", generatedSections);
+    }
+
+    // AC-03 (regression): a fence opened and closed with the same character and length (~~~ ... ~~~) keeps
+    // working as before: the bullet inside is masked, and the real heading after the properly closed fence is
+    // still recognized as an Acceptance Criteria section.
+    [Fact]
+    public void Render_MatchingTildeFenceClosedCorrectly_ClassifiesSectionAfterFenceAsAcceptanceCriteria()
+    {
+        var body = "## Requisitos\n- Uno\n~~~\nalgo de codigo\n~~~\n\n## Criterios de Aceptación\n- Dos";
+
+        var content = SpecGenerator.Render(Issue(body: body), 10).ReplaceLineEndings("\n");
+        var rfStart = content.IndexOf("## Functional Requirements", StringComparison.Ordinal);
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var rfSection = content[rfStart..acStart];
+        var acSection = content[acStart..];
+
+        Assert.Contains("- **RF-01:** Uno", rfSection);
+        Assert.DoesNotContain("RF-02", rfSection);
+        Assert.DoesNotContain("algo de codigo", rfSection);
+        Assert.Contains("- [ ] **AC-01:** Dos", acSection);
+        Assert.DoesNotContain("AC-02", acSection);
+        Assert.EndsWith("- [ ] El proyecto compila y su suite de tests pasa.\n", acSection);
+    }
+
+    // AC-04 (regression, no production change expected): an Acceptance Criteria section containing only the
+    // "Criterio N" template leftovers is discarded entirely by IsMeaningfulContent/CriterioPlaceholderRegex, so
+    // no AC-XX criterion is ever emitted and Render falls back to the generic criteria, exactly like an Issue
+    // without that section at all.
+    [Fact]
+    public void Render_AcceptanceCriteriaSectionWithOnlyPlaceholderCriteria_FallsBackToGenericCriteria()
+    {
+        var body = "## Criterios de Aceptación\n- [ ] Criterio 1\n- [ ] Criterio 2";
+
+        var content = SpecGenerator.Render(Issue(body: body), 10).ReplaceLineEndings("\n");
+        var acStart = content.IndexOf("## Acceptance Criteria", StringComparison.Ordinal);
+        var acSection = content[acStart..];
+
+        Assert.DoesNotContain("AC-0", content);
+        Assert.Equal(
+            "## Acceptance Criteria\n"
+                + "- [ ] El proyecto compila y su suite de tests pasa.\n"
+                + "- [ ] Cada requerimiento funcional está cubierto por al menos un test.\n"
+                + "- [ ] El pipeline de CI sigue pasando en verde.\n",
+            acSection);
+    }
+
+    // RF-02 (additional case, not individually numbered as an AC but required literally by the Functional
+    // Requirement): a line that looks like a task-list bullet but lives inside an open fence must never be read
+    // as a requirement or criterion bullet, only the real bullets before/after the fence are.
+    [Fact]
+    public void Render_BulletLookingLineInsideFence_IsNeverReadAsARequirementOrCriterion()
+    {
+        var body = "## Requisitos\n- Primero\n```\n- [ ] Esto parece una viñeta pero es código\n```\n- Segundo";
+
+        var content = SpecGenerator.Render(Issue(body: body), 10).ReplaceLineEndings("\n");
+        var rfStart = content.IndexOf("## Functional Requirements", StringComparison.Ordinal);
+        var generatedSections = content[rfStart..];
+
+        Assert.Contains("- **RF-01:** Primero", generatedSections);
+        Assert.Contains("- **RF-02:** Segundo", generatedSections);
+        Assert.DoesNotContain("RF-03", generatedSections);
+        Assert.DoesNotContain("Esto parece una viñeta pero es código", generatedSections);
+        // The raw Issue body is still quoted verbatim in Context & Objectives: that is unrelated to RF-02.
+        Assert.Contains("> - [ ] Esto parece una viñeta pero es código", content);
+    }
 }
