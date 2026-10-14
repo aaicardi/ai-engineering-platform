@@ -210,4 +210,4 @@ Toda funcionalidad nueva debe contar con su especificación correspondiente en `
 | 013 | Suite de subagentes nativos y skills de stack |
 | 014 | Pipeline multiagente en `--process-issue` |
 | 015 | Mapeo de criterios de aceptación del Issue en la spec generada |
-| 016 | Diagnóstico de gobernanza y entorno (`--health`) |
+| 017 | Diagnóstico de gobernanza y entorno (`--health`) |

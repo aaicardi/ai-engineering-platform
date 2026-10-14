@@ -1,4 +1,4 @@
-# OpenSpec 016: feat(cli): Add --health diagnostics for governance and environment
+# OpenSpec 017: feat(cli): Add --health diagnostics for governance and environment
 
 ## Issue Reference
 Closes #35
