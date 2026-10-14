@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: Reportar un fallo o comportamiento inesperado
-title: '[BUG]: '
+title: 'fix: '
 labels: 'type:bug'
 assignees: ''
 ---
