@@ -93,10 +93,11 @@ for (var i = 0; i < args.Length; i++)
 if (health)
 {
     if (processIssueArg is not null || issueArg is not null || repoArg is not null || agentArg is not null || specArg is not null
-        || generateSpec || execute || orchestrate)
+        || generateSpec || execute || orchestrate || targetDirArg is not null || baseArg is not null || createPr)
     {
         Console.Error.WriteLine(
-            "[ERROR] --health no se combina con --process-issue, --issue, --repo, --agent, --spec, --generate-spec, --execute ni --orchestrate.");
+            "[ERROR] --health no se combina con --process-issue, --issue, --repo, --agent, --spec, --generate-spec, --execute, "
+            + "--orchestrate, --target-dir, --base ni --create-pr.");
         return 2;
     }
     var healthRoot = rootArg is not null
@@ -381,7 +382,7 @@ static async Task<int> ExecuteAgentAsync(PromptContext context, string root)
 static async Task<int> RunHealthAsync(string root)
 {
     using var cts = CancelOnCtrlC();
-    var diagnostics = new HealthDiagnostics(new AIHarness.Execution.ProcessRunner(), root, Console.Error);
+    var diagnostics = new HealthDiagnostics(HealthProcessRunnerFactory.Create(), root, Console.Error);
     try
     {
         var report = await diagnostics.RunAsync(cts.Token);
