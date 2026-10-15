@@ -145,16 +145,21 @@ public sealed partial class AgentSession
     }
 
     /// <summary>
-    /// Compares two repository paths after normalizing them (<see cref="Path.GetFullPath(string)"/> plus trimming
-    /// the trailing directory separator), case-insensitively only on Windows (case-insensitive file systems);
-    /// symbolic links are not resolved.
+    /// Compares two repository paths after normalizing them (<see cref="Path.GetFullPath(string)"/>, resolving the
+    /// directory when it is itself a symbolic link, and trimming the trailing directory separator),
+    /// case-insensitively only on Windows (case-insensitive file systems).
     /// </summary>
     private static bool PathsEqual(string first, string second)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         return string.Equals(Normalize(first), Normalize(second), comparison);
 
-        static string Normalize(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        static string Normalize(string path)
+        {
+            var fullPath = Path.GetFullPath(path);
+            var target = new DirectoryInfo(fullPath).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
+            return Path.TrimEndingDirectorySeparator(target ?? fullPath);
+        }
     }
 
     // { "<name>": { "description", "prompt", "tools"?, "model"? } } — the format of `claude --agents`.

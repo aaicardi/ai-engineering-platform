@@ -10,5 +10,11 @@ namespace AIHarness.Cli;
 /// </summary>
 internal static class HealthProcessRunnerFactory
 {
-    public static Func<IProcessRunner> Create { get; set; } = static () => new ProcessRunner();
+    private static Func<IProcessRunner> _create = static () => new ProcessRunner();
+
+    public static Func<IProcessRunner> Create
+    {
+        get => _create;
+        set => _create = value ?? throw new ArgumentNullException(nameof(value));
+    }
 }

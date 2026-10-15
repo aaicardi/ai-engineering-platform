@@ -225,4 +225,23 @@ public sealed class AgentSessionTests : IDisposable
 
         Assert.DoesNotContain(session.Warnings, w => w.Contains("Se ignora la configuración de Claude Code"));
     }
+
+    // SEC-3: a symbolic link to the harness repository is still the harness repository.
+    [Fact]
+    public void Prepare_TargetRootIsASymlinkToTheHarnessRoot_DoesNotWarnAboutIgnoredSettings()
+    {
+        using var fixture = new SelfTargetFixture();
+        var link = fixture.Root + "-link";
+        Directory.CreateSymbolicLink(link, fixture.Root);
+        try
+        {
+            var session = fixture.Prepare(link);
+
+            Assert.DoesNotContain(session.Warnings, w => w.Contains("Se ignora la configuración de Claude Code"));
+        }
+        finally
+        {
+            Directory.Delete(link);
+        }
+    }
 }

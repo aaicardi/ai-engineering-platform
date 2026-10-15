@@ -24,9 +24,12 @@ public sealed class HealthDiagnostics(
     /// <summary>
     /// Working directory for every environment check's subprocess: a neutral directory, not
     /// <c>repositoryRoot</c>, so a <c>global.json</c> or other local configuration of the inspected repository
-    /// cannot change the result (e.g. <c>dotnet --version</c>; spec 052's RF-03).
+    /// cannot change the result (e.g. <c>dotnet --version</c>; spec 052's RF-03). The user's home rather than the
+    /// temp directory: <c>/tmp</c> is shared by every user, so anyone could plant a <c>global.json</c> there, while
+    /// the home's ancestors are writable only by root. Falls back to the temp directory when there is no home.
     /// </summary>
-    private static readonly string NeutralWorkingDirectory = Path.GetTempPath();
+    internal static readonly string NeutralWorkingDirectory =
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) is { Length: > 0 } home ? home : Path.GetTempPath();
 
     // Several environment checks now run concurrently (RF-02) and all of them write progress to `error`; wrapping
     // it keeps those writes from racing, since neither StringWriter (used by tests) nor TextWriter in general are
@@ -38,6 +41,10 @@ public sealed class HealthDiagnostics(
     public async Task<HealthReport> RunAsync(CancellationToken cancellationToken = default)
     {
         var inspection = new RepositoryInspector(repositoryRoot).Inspect();
+        // Governance checks first, so their progress lines precede the concurrent environment checks' in STDERR.
+        var claudeMdCheck = CheckClaudeMd(inspection);
+        var agentsCheck = CheckAgents(inspection);
+        var specsCheck = CheckSpecs(inspection);
         var gitTask = CheckVersionAsync("git", HealthCheckLevel.Critical, "git", ["--version"], cancellationToken);
         var dotnetTask = CheckVersionAsync("dotnet", HealthCheckLevel.Warning, "dotnet", ["--version"], cancellationToken);
         var claudeTask = CheckVersionAsync("claude", HealthCheckLevel.Critical, "claude", ["--version"], cancellationToken);
@@ -49,9 +56,9 @@ public sealed class HealthDiagnostics(
 
         List<HealthCheck> checks =
         [
-            CheckClaudeMd(inspection),
-            CheckAgents(inspection),
-            CheckSpecs(inspection),
+            claudeMdCheck,
+            agentsCheck,
+            specsCheck,
             await gitTask,
             await dotnetTask,
             await claudeTask,

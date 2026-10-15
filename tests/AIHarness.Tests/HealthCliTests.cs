@@ -152,4 +152,14 @@ public sealed class HealthCliTests : IDisposable
         Assert.Equal("critical", claudeMd.GetProperty("level").GetString());
         Assert.False(claudeMd.GetProperty("ok").GetBoolean());
     }
+
+    // SEC-4: the seam never accepts null, so a test cannot leave --health without a process runner.
+    [Fact]
+    public void HealthProcessRunnerFactory_Null_IsRejectedAndKeepsTheCurrentFactory()
+    {
+        var current = HealthProcessRunnerFactory.Create;
+
+        Assert.Throws<ArgumentNullException>(() => HealthProcessRunnerFactory.Create = null!);
+        Assert.Same(current, HealthProcessRunnerFactory.Create);
+    }
 }

@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Diagnostics;
 using AIHarness.Diagnostics;
 using AIHarness.Execution;
@@ -149,6 +150,34 @@ public sealed class HealthDiagnosticsTests : IDisposable
 
         Assert.NotEmpty(runner.Requests);
         Assert.All(runner.Requests, r => Assert.NotEqual(_root, r.WorkingDirectory));
+    }
+
+    // SEC-1: /tmp is shared by every user, so a global.json planted there could still influence `dotnet --version`;
+    // the neutral directory is the user's home.
+    [Fact]
+    public async Task RunAsync_EnvironmentChecks_RunFromTheUsersHomeNotTheSharedTempDirectory()
+    {
+        var runner = AllToolsAvailable();
+
+        await Create(runner, _ => null).RunAsync();
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        Assert.Equal(home, HealthDiagnostics.NeutralWorkingDirectory);
+        Assert.All(runner.Requests, r => Assert.Equal(home, r.WorkingDirectory));
+        Assert.All(runner.Requests, r => Assert.NotEqual(Path.GetTempPath(), r.WorkingDirectory));
+    }
+
+    // CR-1: running the environment checks concurrently must not move the governance progress lines after them.
+    [Fact]
+    public async Task RunAsync_GovernanceProgress_IsWrittenBeforeEnvironmentProgress()
+    {
+        await Create(AllToolsAvailable(), _ => null).RunAsync();
+
+        var lines = _error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(
+            ["[INFO] Comprobando CLAUDE.md...", "[INFO] Comprobando Agentes (.claude/agents)...",
+             "[INFO] Comprobando Especificaciones (openspec/specs)..."],
+            lines.Take(3).Select(l => l.TrimEnd('\r')));
     }
 
     [Fact]
@@ -372,6 +401,19 @@ public sealed class HealthDiagnosticsTests : IDisposable
 
         Assert.Contains("líneas", json);
         Assert.DoesNotContain("\\u00ed", json);
+    }
+
+    // SEC-2: accents stay literal, but HTML-sensitive characters are still escaped.
+    [Fact]
+    public void ToJson_DetailWithHtmlSensitiveCharacters_EscapesThem()
+    {
+        var report = new HealthReport([new HealthCheck("gh", HealthCheckLevel.Warning, false, "<script>&'")]);
+
+        var json = report.ToJson();
+
+        Assert.DoesNotContain("<script>", json);
+        Assert.Contains("\\u003Cscript\\u003E\\u0026\\u0027", json);
+        Assert.Equal("<script>&'", JsonNode.Parse(json)!["checks"]![0]!["detail"]!.GetValue<string>());
     }
 
     [Fact]
