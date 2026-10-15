@@ -97,7 +97,8 @@ public sealed partial class AgentSession
 
         Directory.CreateDirectory(runDirectory);
         var stack = StackProfile.Detect(targetRoot);
-        var session = new AgentSession(agentName, runDirectory, stack, CollectWarnings(targetRoot, Path.Combine(claudeDir, "agents"), agents.Keys));
+        var session = new AgentSession(agentName, runDirectory, stack,
+            CollectWarnings(harnessRoot, targetRoot, Path.Combine(claudeDir, "agents"), agents.Keys));
 
         File.WriteAllText(session.AgentsPath, AgentsJson(agents));
         File.WriteAllText(session.SettingsPath, SettingsJson(Path.Combine(claudeDir, "settings.json"), stack));
@@ -121,7 +122,7 @@ public sealed partial class AgentSession
         return agents;
     }
 
-    private static List<string> CollectWarnings(string targetRoot, string suiteAgentsDir, IEnumerable<string> suiteAgents)
+    private static List<string> CollectWarnings(string harnessRoot, string targetRoot, string suiteAgentsDir, IEnumerable<string> suiteAgents)
     {
         var warnings = new List<string>();
         var targetAgentsDir = Path.Combine(targetRoot, ".claude", "agents");
@@ -134,10 +135,26 @@ public sealed partial class AgentSession
             warnings.Add($"El repositorio destino define los agentes {string.Join(", ", overridden)}; se usa la versión del Harness.");
 
         var targetClaudeDir = Path.Combine(targetRoot, ".claude");
-        if (Directory.Exists(targetClaudeDir) && Directory.EnumerateFiles(targetClaudeDir, "settings*.json").Any())
+        // When the target is the harness repository itself (normalized paths), there is no foreign settings file
+        // being ignored — the harness is reading its own .claude/settings.json — so the warning would be noise.
+        if (!PathsEqual(harnessRoot, targetRoot)
+            && Directory.Exists(targetClaudeDir) && Directory.EnumerateFiles(targetClaudeDir, "settings*.json").Any())
             warnings.Add("Se ignora la configuración de Claude Code del repositorio destino (.claude/settings*.json).");
         // --restricted does not load the target's own agents, skills or commands either (verified, ADR-001).
         return warnings;
+    }
+
+    /// <summary>
+    /// Compares two repository paths after normalizing them (<see cref="Path.GetFullPath(string)"/> plus trimming
+    /// the trailing directory separator), case-insensitively only on Windows (case-insensitive file systems);
+    /// symbolic links are not resolved.
+    /// </summary>
+    private static bool PathsEqual(string first, string second)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(Normalize(first), Normalize(second), comparison);
+
+        static string Normalize(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
     }
 
     // { "<name>": { "description", "prompt", "tools"?, "model"? } } — the format of `claude --agents`.

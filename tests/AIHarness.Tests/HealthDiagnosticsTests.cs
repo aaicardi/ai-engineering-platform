@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AIHarness.Diagnostics;
 using AIHarness.Execution;
 using AIHarness.Inspection;
@@ -37,6 +38,23 @@ internal sealed class FakeProcessRunner : IProcessRunner
         {
             await Task.Delay(Timeout.Infinite, ct);
             return 0;
+        };
+        return this;
+    }
+
+    /// <summary>
+    /// Scripts <paramref name="commandLine"/> to take <paramref name="delay"/> before completing, honoring
+    /// cancellation like a real process would (AC-03 of spec 052: simulates a slow environment check without
+    /// actually blocking the thread or ignoring the per-check timeout/<see cref="CancellationToken"/>).
+    /// </summary>
+    public FakeProcessRunner Delay(string commandLine, TimeSpan delay, int exitCode = 0, string stdout = "")
+    {
+        _script[commandLine] = async (ct, onStandardOutput) =>
+        {
+            await Task.Delay(delay, ct);
+            if (stdout.Length > 0)
+                onStandardOutput(stdout);
+            return exitCode;
         };
         return this;
     }
@@ -85,6 +103,52 @@ public sealed class HealthDiagnosticsTests : IDisposable
 
         Assert.True(report.Healthy);
         Assert.All(report.Checks, c => Assert.True(c.Ok));
+    }
+
+    // AC-03 (spec 052/RF-02): the 6 environment checks (git, dotnet, claude, session, gh, credentials) now run in
+    // parallel. Each one is scripted to take 1s; if they ran sequentially (as before RF-02) the whole diagnostic
+    // would take >= 6s. The 3s bound is generous slack above the ~1s a parallel run should take, while still being
+    // far below the 6s a sequential run would need, so this is a real parallelism assertion, not a smoke test.
+    [Fact]
+    public async Task RunAsync_SixEnvironmentChecksEachTakingOneSecond_RunInParallelAndKeepTheCurrentOrder()
+    {
+        var oneSecond = TimeSpan.FromSeconds(1);
+        var runner = new FakeProcessRunner()
+            .Delay("git --version", oneSecond)
+            .Delay("dotnet --version", oneSecond)
+            .Delay("claude --version", oneSecond)
+            .Delay("claude auth status", oneSecond)
+            .Delay("gh --version", oneSecond)
+            .Delay("gh auth status", oneSecond);
+        var stopwatch = Stopwatch.StartNew();
+
+        var report = await Create(runner, _ => null).RunAsync();
+
+        stopwatch.Stop();
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+            $"Las 6 comprobaciones de entorno tardaron {stopwatch.Elapsed.TotalSeconds:0.00}s; se esperaba que corrieran en paralelo (< 3s).");
+        // The order of today: 3 governance checks (synchronous), then the 6 environment checks in the order they
+        // are built in HealthDiagnostics.RunAsync — Task.WhenAll does not reorder them by completion time.
+        Assert.Equal(
+            [
+                "CLAUDE.md", "Agentes (.claude/agents)", "Especificaciones (openspec/specs)",
+                "git", "dotnet", "claude", "Sesión de Claude Code", "gh", "Credenciales de GitHub",
+            ],
+            report.Checks.Select(c => c.Name));
+    }
+
+    // AC-04 (spec 052/RF-03): a local global.json or similar configuration of the inspected repository must not be
+    // able to influence an environment check's subprocess (e.g. `dotnet --version`); every request's working
+    // directory must be a neutral directory, never the repository under inspection.
+    [Fact]
+    public async Task RunAsync_EnvironmentChecks_NeverUseTheInspectedRepositoryAsWorkingDirectory()
+    {
+        var runner = AllToolsAvailable();
+
+        await Create(runner, _ => null).RunAsync();
+
+        Assert.NotEmpty(runner.Requests);
+        Assert.All(runner.Requests, r => Assert.NotEqual(_root, r.WorkingDirectory));
     }
 
     [Fact]
@@ -293,6 +357,21 @@ public sealed class HealthDiagnosticsTests : IDisposable
 
         Assert.Contains("\"level\": \"critical\"", json);
         Assert.Contains("\"healthy\": true", json);
+    }
+
+    // AC-05 (spec 052/RF-04): the CLAUDE.md check's detail is "{N} líneas, {M} secciones"; the default
+    // System.Text.Json encoder would escape "í" to "í" (still valid JSON, but not what the issue asks for).
+    // Checked against the raw string ToJson() returns, not a re-parsed object — parsing would normalize the
+    // escape back to the same character and hide a regression in the encoder configuration.
+    [Fact]
+    public void ToJson_DetailWithAccentedCharacters_WritesThemLiterallyNotAsUnicodeEscapeSequences()
+    {
+        var report = new HealthReport([new HealthCheck("CLAUDE.md", HealthCheckLevel.Critical, true, "12 líneas, 3 secciones")]);
+
+        var json = report.ToJson();
+
+        Assert.Contains("líneas", json);
+        Assert.DoesNotContain("\\u00ed", json);
     }
 
     [Fact]

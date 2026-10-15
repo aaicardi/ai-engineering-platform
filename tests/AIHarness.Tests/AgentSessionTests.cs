@@ -45,6 +45,29 @@ internal sealed class SuiteFixture : IDisposable
     }
 }
 
+/// <summary>A repository that is both the harness and the target of its own <see cref="AgentSession"/> (AC-06, spec 052).</summary>
+internal sealed class SelfTargetFixture : IDisposable
+{
+    public string Root { get; } = Directory.CreateTempSubdirectory("aiharness-self-").FullName;
+    public string RunDirectory => Path.Combine(Root + "-run", "1");
+
+    public SelfTargetFixture()
+    {
+        var agents = Directory.CreateDirectory(Path.Combine(Root, ".claude", "agents")).FullName;
+        File.WriteAllText(Path.Combine(agents, "lead.md"), "---\nname: lead\ndescription: Coordina\n---\n# Agent: Lead\ncuerpo-lead");
+        File.WriteAllText(Path.Combine(Root, ".claude", "settings.json"), "{\"permissions\":{\"allow\":[\"Edit\"]}}");
+    }
+
+    public AgentSession Prepare(string targetRoot) => AgentSession.Prepare(Root, targetRoot, RunDirectory, "lead");
+
+    public void Dispose()
+    {
+        foreach (var dir in new[] { Root, Root + "-run" })
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+    }
+}
+
 public sealed class AgentSessionTests : IDisposable
 {
     private readonly SuiteFixture _suite = new();
@@ -173,5 +196,33 @@ public sealed class AgentSessionTests : IDisposable
         Assert.Contains(session.Warnings, w => w.Contains("developer") && w.Contains("versión del Harness"));
         Assert.Contains(session.Warnings, w => w.Contains("settings"));
         Assert.DoesNotContain("Bash(*)", Rules(Json(session.SettingsPath), "allow"));
+    }
+
+    // AC-06 (spec 052/RF-05): when the harness repository runs the agent suite on itself, the harness's own
+    // .claude/settings.json is not a "foreign" configuration being ignored, so the warning would be noise.
+    [Fact]
+    public void Prepare_HarnessRootEqualsTargetRoot_DoesNotWarnAboutIgnoredSettings()
+    {
+        using var fixture = new SelfTargetFixture();
+
+        var session = fixture.Prepare(fixture.Root);
+
+        Assert.DoesNotContain(session.Warnings, w => w.Contains("Se ignora la configuración de Claude Code"));
+    }
+
+    // Regression for AC-06's other half: a target distinct from the harness, with its own settings.json, must
+    // still get the warning (Prepare_TargetAgentsAndSettings_AreReportedAsOverriddenAndIgnored above already
+    // covers this with Harness != Target; kept here only as a reminder it is the counterpart of this test).
+    [Fact]
+    public void Prepare_HarnessRootEqualsTargetRootViaNonNormalizedPath_StillDoesNotWarnAboutIgnoredSettings()
+    {
+        using var fixture = new SelfTargetFixture();
+        // Same directory as Root, but spelled without normalizing: proves the comparison normalizes paths
+        // (Path.GetFullPath + trimming the trailing separator) instead of only matching identical strings.
+        var nonNormalizedTarget = Path.Combine(fixture.Root, "nested", "..");
+
+        var session = fixture.Prepare(nonNormalizedTarget);
+
+        Assert.DoesNotContain(session.Warnings, w => w.Contains("Se ignora la configuración de Claude Code"));
     }
 }

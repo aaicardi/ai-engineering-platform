@@ -1,3 +1,4 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -25,6 +26,13 @@ public sealed record HealthReport(IReadOnlyList<HealthCheck> Checks)
             })
             .ToArray());
         var root = new JsonObject { ["healthy"] = Healthy, ["checks"] = checks };
-        return root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        // UnsafeRelaxedJsonEscaping leaves non-ASCII characters (e.g. accents) unescaped while still escaping what
+        // JSON itself requires (quotes, backslashes, control characters); "unsafe" here refers to HTML-sensitive
+        // characters that the default encoder escapes out of caution, not JSON validity (spec 052's RF-04).
+        return root.ToJsonString(new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
     }
 }
